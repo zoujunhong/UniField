@@ -2,7 +2,7 @@
 # UniField: Joint Multi-Domain Training for Universal Surface Pressure Modeling
 
 <p align="center">
-  <img src="image.png" alt="Overview of UniField" width="700">
+  <img src="images/architecture.png" alt="Overview of UniField" width="700">
 </p>
 
 > **UniField** is a universal flow-field modeling framework that learns shared aerodynamic representations across heterogeneous domains — including cars, trains, aircraft, and general shapes — via **joint multi-domain training**.  
