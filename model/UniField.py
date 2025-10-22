@@ -13,14 +13,11 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from .utils.networks import farthest_point_sample, knn_interpolation, LinearNorm, knn
-from .utils.SlotAttention import SlotAttention
-from timm.models.vision_transformer import PatchEmbed, Block
-from .utils.GansformerGenerator import Generator_pointcloud
+from .utils.networks import knn_interpolation, LinearNorm, knn
+from .utils.SlotAttention import PointSlotAttention
 
 def modulate(x, shift, scale):
     return x * (1 + scale.unsqueeze(1)) + shift.unsqueeze(1)
-
 
 def index_points(points, idx):
     # 从 points 中提取指定索引的点
@@ -69,6 +66,7 @@ class MultiHeadPointAttention(nn.Module):
 
         with torch.no_grad():
             idx = knn(pos, pos, self.k)  # [B, N, k]
+            # print(idx.shape)
         
         pos_neighbors = index_points(pos, idx)  # [B, N, k, 3]
         # q_neighbors = index_points(q, idx)  # [B, N, k, H, D]
@@ -114,12 +112,94 @@ class PointTransformerLayer(nn.Module):
         x = x + self.FFN(x)
         return x
 
-class PointTransformer(nn.Module):
+
+class AdaptLayer(nn.Module):
+    def __init__(self, in_channels, adapt_channels, cond_channels):
+        super().__init__()
+        self.in_proj = LinearNorm(in_channels, adapt_channels)
+        self.out_proj = LinearNorm(adapt_channels, in_channels)
+        self.cond_proj = nn.Sequential(
+                            LinearNorm(cond_channels, 2*adapt_channels),
+                            nn.Linear(2*adapt_channels, 2*adapt_channels))
+
+    def forward(self, x, cond):
+        shift, scale = self.cond_proj(cond).chunk(2, dim=1)
+        x = x + self.out_proj(modulate(self.in_proj(x), shift, scale))    
+        return x
+
+class MultiFlowCondAdaptRouter(nn.Module):
+    def __init__(self, branches):
+        super().__init__()
+        self.branches = nn.ModuleList(branches)
+
+    def forward(self, x, cond, route):
+        # x: (B, D_in)
+        # route: (B,) integer tensor (e.g., [0, 2, 1, 0, ...])
+
+        B = x.size(0)
+        branch_outputs = []  # List of (B, D_out)
+        for branch in self.branches:
+            branch_outputs.append(branch(x, cond))  # 所有支路同时处理输入
+
+        # Stack: (n_branch, B, D_out)
+        stacked = torch.stack(branch_outputs, dim=0)
+
+        # route -> one-hot: (B, n_branch)
+        one_hot = F.one_hot(route, num_classes=len(self.branches)).float()
+
+        # (n_branch, B, D_out) * (B, n_branch) → (B, D_out)
+        # 利用 einsum 或广播实现选择
+        selected_output = torch.einsum('mbnd,bm->bnd', stacked, one_hot)
+
+        return selected_output
+
+class AdaptClassifier(nn.Module):
+    def __init__(self, in_channels, num_coeff):
+        super().__init__()
+        self.coefficient_predictor = nn.Sequential(
+            LinearNorm(in_channels, 256),
+            nn.Linear(256, num_coeff)
+        )
+
+    def forward(self, x):  
+        return self.coefficient_predictor(x)
+
+class MultiFlowClassifierRouter(nn.Module):
+    def __init__(self, branches):
+        super().__init__()
+        self.branches = nn.ModuleList(branches)
+
+    def forward(self, x, route):
+        # x: (B, D_in)
+        # route: (B,) integer tensor (e.g., [0, 2, 1, 0, ...])
+
+        B = x.size(0)
+        branch_outputs = []  # List of (B, D_out)
+        for branch in self.branches:
+            branch_outputs.append(branch(x))  # 所有支路同时处理输入
+
+        # Stack: (n_branch, B, D_out)
+        stacked = torch.stack(branch_outputs, dim=0)
+
+        # route -> one-hot: (B, n_branch)
+        one_hot = F.one_hot(route, num_classes=len(self.branches)).float()
+
+        # (n_branch, B, D_out) * (B, n_branch) → (B, D_out)
+        # 利用 einsum 或广播实现选择
+        selected_output = torch.einsum('mbd,bm->bd', stacked, one_hot)
+
+        return selected_output
+    
+class PointTransformer_MultiFlowCondAdapter(nn.Module):
     def __init__(self,
-                 depth=[4, 4, 6, 12, 8],
-                 channels=[64, 128, 256, 512, 1024],
+                 depth=[8, 8, 8, 8, 8],
+                 channels=[192, 384, 768, 1536, 3072],
                  num_points=[1024, 256, 64, 16],
+                 adapter_dim=64,
+                 head_dim=64,
                  out_channels=1,
+                 cond_dims=2,
+                 num_routes=3,
                  k=16):
         super().__init__()
         self.depth = depth
@@ -132,13 +212,22 @@ class PointTransformer(nn.Module):
         
         self.proj_down_layers = nn.ModuleList()
         self.proj_up_layers = nn.ModuleList()
+        
         self.tf_down_layers = nn.ModuleList()
         self.tf_up_layers = nn.ModuleList()
+        
+        self.downsample_layers = nn.ModuleList()
+        
+        self.adapt_down_layers = nn.ModuleList()
+        self.adapt_up_layers = nn.ModuleList()
         
         for i in range(len(depth)):
             layers = nn.ModuleList()
             for j in range(depth[i]):
-                layers.append(PointTransformerLayer(channels[i], num_heads=max(channels[i]//64, 1), k=k))
+                layers.append(PointTransformerLayer(channels[i], num_heads=max(channels[i]//head_dim, 1), k=k))
+                
+                self.adapt_down_layers.append(MultiFlowCondAdaptRouter(
+                        [AdaptLayer(channels[i], adapter_dim, cond_dims) for _ in range(num_routes)]))
                 
             self.tf_down_layers.append(layers)
             
@@ -148,11 +237,14 @@ class PointTransformer(nn.Module):
                 
                 layers = nn.ModuleList()
                 for j in range(depth[i]):
-                    layers.append(PointTransformerLayer(channels[i], num_heads=max(channels[i]//64, 1), k=k))
+                    layers.append(PointTransformerLayer(channels[i], num_heads=max(channels[i]//head_dim, 1), k=k))
+                    
+                    self.adapt_up_layers.append(MultiFlowCondAdaptRouter(
+                        [AdaptLayer(channels[i], adapter_dim, cond_dims) for _ in range(num_routes)]))
                 
                 self.tf_up_layers.append(layers)
         
-            #     self.downsample_layers.append(PointSlotAttention(channels[i+1], channels[i+1]*4, channels[i], num_points[i]))
+                self.downsample_layers.append(PointSlotAttention(num_points[i], channels[i], hidden_dim=channels[i]*4, k=k))
         
         self.apply(self._init_weights)
 
@@ -165,34 +257,34 @@ class PointTransformer(nn.Module):
             nn.init.constant_(m.bias, 0)
             nn.init.constant_(m.weight, 1.0)
         
-    def forward(self, pos): # [B, N, 3], [B, 2]
+    def forward(self, pos, cond, route): # [B, N, 3], [B, 2]
         B, N, _ = pos.shape
         x = self.proj_in(pos)
         x_list = []
         pos_list = []
         
+        count = 0
         for i in range(len(self.depth)):
             
             for j in range(self.depth[i]):
+                x = self.adapt_down_layers[count](x, cond, route)
+                count = count + 1
                 x = self.tf_down_layers[i][j](x, pos)
             
             x_list.append(x)
             pos_list.append(pos)
             
             if i < len(self.depth) - 1:
-                if i == 0:
-                    for j in range(B):
-                        point_idx = torch.randperm(N, device=x.device)[:self.num_points[i]][None] if j == 0 else torch.cat([point_idx, torch.randperm(N, device=x.device)[:self.num_points[i]][None]], dim=0)
-                else:
-                    point_idx = farthest_point_sample(pos, self.num_points[i])
+                x, pos = self.downsample_layers[i](x, pos)
+                x = self.proj_down_layers[i](x)
 
-                pos = pos.gather(1, point_idx.unsqueeze(-1).expand(-1, -1, 3))  # [B, k, 3]
-                x = self.proj_down_layers[i](x.gather(1, point_idx.unsqueeze(-1).expand(-1, -1, self.channels[i])))  # [B, k, D]
-
+        count = 0
         for i in range(len(self.depth) - 1):
-            x = self.proj_up_layers[i](knn_interpolation(pos_list[-(i+2)], pos_list[-(i+1)], x, k=self.k)) + x_list[-(i+2)]
+            x = knn_interpolation(pos_list[-(i+2)], pos_list[-(i+1)], self.proj_up_layers[i](x), k=self.k) + x_list[-(i+2)]
             
             for j in range(self.depth[-(i+2)]):
+                x = self.adapt_up_layers[-(count+1)](x, cond, route)
+                count = count + 1
                 x = self.tf_up_layers[-(i+1)][j](x, pos_list[-(i+2)])
         
         return self.proj_out(x)
@@ -200,12 +292,17 @@ class PointTransformer(nn.Module):
 
     
 if __name__ == '__main__':
-    B, N, C = 5, 10000, 3
+    B, N, C = 1, 8192, 3
     pos = torch.randn(B, N, 3).cuda()
-
-    pt_layer = PointTransformer(k=16).cuda()
+    cond = torch.randn(B, 2).cuda()
+    route = torch.randint(0, 2, (B,)).cuda()
+    pt_layer = PointTransformer_MultiFlowCondAdapter(
+                 depth=[16, 16, 16, 16, 16],
+                 channels=[256, 512, 1024, 2048, 4096],
+                 num_points=[1024, 256, 64, 16],
+                 k=16).cuda()
     
     from thop import profile
-    Flops, Params = profile(pt_layer,(pos,))
+    Flops, Params = profile(pt_layer,(pos,cond,route,))
     print('Flops:{:6f}G'.format(Flops/1e9))
     print('Params:{:6f}M'.format(Params/1e6))

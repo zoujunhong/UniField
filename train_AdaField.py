@@ -12,9 +12,8 @@ import numpy as np
 import torch.multiprocessing as mp
 import torch.distributed as dist
 # Our libs
-from dataset.DrivAerNet import get_dataloaders, PRESSURE_MEAN, PRESSURE_STD
-from dataset.dataset import *
-from model.SlotAttnPointTransformer import PointTransformer_CondAdapter as Model
+from dataset import *
+from model.AdaField import PointTransformer_CondAdapter as Model
 from utils_train import AverageMeter, get_params_groups, cosine_scheduler, load_model_weights
 torch.set_float32_matmul_precision('high')
 seed_value = 200099  # 设定随机数种子
@@ -55,13 +54,11 @@ def train(model, data_loader, optimizers, epoch, gpu, lr_schedule, scaler, args)
         for i, param_group in enumerate(optimizers.param_groups):
             param_group["lr"] = lr_schedule[it] * param_group["base_lr"]
 
-        point_cloud, pressure, cond, route, cd = data
+        point_cloud, pressure, cond, route = data
         point_cloud = point_cloud.float().cuda(gpu)
         pressure = pressure.float().cuda(gpu)
-        # pressure = (pressure.float().cuda(gpu) - PRESSURE_MEAN) / PRESSURE_STD
         cond = cond.float().cuda(gpu)
         route = route.long().cuda(gpu)
-        cd = cd.float().cuda(gpu)
         
         optimizers.zero_grad()
         # tau = tau_schedule[it]
@@ -97,10 +94,6 @@ def train(model, data_loader, optimizers, epoch, gpu, lr_schedule, scaler, args)
                   ave_loss_1.average()), file=f)
             f.close()
 
-    # torch.save(
-    #     optimizer.state_dict(),
-    #     '{}/opt_epoch_{}.pth'.format(args.saveroot, epoch))
-
 
 def main(gpu,args):
     # Network Builders
@@ -114,21 +107,22 @@ def main(gpu,args):
         rank=rank,
         timeout=datetime.timedelta(seconds=300))
 
-    
-    # dataset_train = FlowBench_3D_LDC(data_root='/data/home/zdhs0017/zoujunhong/data/FlowBench/LDC_NS_3D/point_cloud/', repeat=10)
-    # sampler_train = torch.utils.data.distributed.DistributedSampler(dataset_train, seed=seed_value)
-    # loader_train = MultiEpochsDataLoader(dataset_train, batch_size=args.batchsize, shuffle=False, sampler=sampler_train, 
-    #                                 pin_memory=True, num_workers=args.workers)
-    loader_train = get_dataloaders(
-        dataset_path='/data/home/zdhs0017/zoujunhong/data/DrivAerNet++/Pressure',
-        num_points=args.points,
-        batch_size=args.batchsize,
-        world_size=args.gpu_num,
-        rank=gpu,
-        num_workers=args.workers)
+    if args.dataset == 'flowbench':
+        dataset_train = FlowBench_3D_LDC(data_root=args.data_root, repeat=10)
+        sampler_train = torch.utils.data.distributed.DistributedSampler(dataset_train, seed=seed_value)
+        loader_train = MultiEpochsDataLoader(dataset_train, batch_size=args.batchsize, shuffle=False, sampler=sampler_train, 
+                                        pin_memory=True, num_workers=args.workers)
+    elif args.dataset == 'drivaernet++':
+        loader_train = get_dataloaders(
+            dataset_path=args.data_root,
+            num_points=args.points,
+            batch_size=args.batchsize,
+            world_size=args.gpu_num,
+            rank=gpu,
+            num_workers=args.workers)
     
     # load nets into gpu
-    if args.modelscale_option == 0:
+    if args.modelscale == '250m':
         model = Model(
             depth=[4, 4, 6, 12, 8],
             channels=[64, 128, 256, 512, 1024],
@@ -136,7 +130,7 @@ def main(gpu,args):
             out_channels=1,
             cond_dims=2,
             k=16)
-    elif args.modelscale_option == 1:
+    elif args.modelscale == '1b':
         model = Model(
             depth=[4, 4, 6, 12, 8],
             channels=[128, 256, 612, 1024, 2048],
@@ -144,7 +138,7 @@ def main(gpu,args):
             out_channels=1,
             cond_dims=2,
             k=16)
-    elif args.modelscale_option == 2:
+    elif args.modelscale == '2b':
         model = Model(
             depth=[8, 8, 8, 8, 8],
             channels=[192, 384, 768, 1536, 3072],
@@ -152,6 +146,21 @@ def main(gpu,args):
             out_channels=1,
             cond_dims=2,
             k=16)
+    elif args.modelscale == 'customize': # you can also customize your model parameter here
+        model = Model(
+            depth=[8, 8, 8, 8, 8],
+            channels=[192, 384, 768, 1536, 3072],
+            num_points=[1024, 256, 64, 16],
+            out_channels=1,
+            cond_dims=2,
+            num_routes=3,
+            k=16)
+    
+        
+    def count_parameters(model):
+        return sum(p.numel() for p in model.parameters() if p.requires_grad)
+    
+    print('模型参数量：{}M'.format(count_parameters(model)/1e6))
     
     if args.checkpoint != '':
         load_model_weights(model, args.checkpoint)
@@ -207,11 +216,15 @@ if __name__ == '__main__':
     parser.add_argument("--checkpoint",type=str,default='')
     parser.add_argument("--total_epoch",type=int,default=100)
     parser.add_argument("--resume_epoch",type=int,default=0)
-    parser.add_argument("--save_step",type=int,default=5)
+    parser.add_argument("--save_step",type=int,default=20)
+    
+    parser.add_argument('--dataset', type=str, default="drivaernet++", choices=["drivaernet++", "flowbench"]) 
+    parser.add_argument('--data_root', type=str, default="/path/to/dataset/root_dir") 
+    # /path/to/DrivAerNet++/Pressure for drivaernet++ and /path/to/FlowBench/LDC_NS_3D/point_cloud/ for flowbench
     
     parser.add_argument("--points",type=int,default=8192)
-    parser.add_argument("--dataset_option",type=int,default=0)
-    parser.add_argument("--modelscale_option",type=int,default=0) # 0,1,2 for 250M, 1B, 2B model
+    parser.add_argument("--modelscale", type=str, default="250m", choices=["250m", "1b", "2b", "customize"])
+    # for "customize" choice, specify the network hyperparameter at line 150
     
     parser.add_argument("--port",type=int,default=45325)
     args = parser.parse_args()

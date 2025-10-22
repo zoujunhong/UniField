@@ -13,11 +13,11 @@ import torch.nn.functional as F
 import numpy as np
 import torch.multiprocessing as mp
 import torch.distributed as dist
-import inspect
+from torch.utils.data import ConcatDataset
 # Our libs
 from dataset.DrivAerNet import PRESSURE_MEAN, PRESSURE_STD
-from dataset.dataset import *
-from model.SlotAttnPointTransformer_MultiFlowCondAdapter import PointTransformer_MultiFlowCondAdapter as Model
+from dataset import *
+from model.UniField import PointTransformer_MultiFlowCondAdapter as Model
 from utils_train import AverageMeter, get_params_groups, cosine_scheduler, MultiEpochsDataLoader, load_model_weights
 torch.set_float32_matmul_precision('high')
 seed_value = 200099  # 设定随机数种子
@@ -85,11 +85,10 @@ def train(model, data_loader, optimizers, epoch, gpu, lr_schedule, scaler, args)
         for i, param_group in enumerate(optimizers.param_groups):
             param_group["lr"] = lr_schedule[it] * param_group["base_lr"]
 
-        point_cloud, pressure, cond, route, Cd = data
+        point_cloud, pressure, cond, route = data
         point_cloud = point_cloud.float().cuda(gpu)
         pressure = pressure.float().cuda(gpu)
         cond = cond.float().cuda(gpu)
-        Cd = Cd.float().cuda(gpu)
         route = route.cuda(gpu)
         
         optimizers.zero_grad()
@@ -97,7 +96,6 @@ def train(model, data_loader, optimizers, epoch, gpu, lr_schedule, scaler, args)
         
         with torch.autocast(device_type='cuda', dtype=torch.float16):
             rec = model(point_cloud[:,:,:3], cond, route)
-             
             loss_rec = F.l1_loss(rec[:,:,0], pressure)
             loss_total = loss_rec
         
@@ -125,11 +123,6 @@ def train(model, data_loader, optimizers, epoch, gpu, lr_schedule, scaler, args)
             f.close()
 
 
-    # torch.save(
-    #     optimizer.state_dict(),
-    #     '{}/opt_epoch_{}.pth'.format(args.saveroot, epoch))
-
-
 def main(gpu,args):
     # Network Builders
     load_gpu = gpu+args.start_gpu
@@ -142,37 +135,56 @@ def main(gpu,args):
         rank=rank,
         timeout=datetime.timedelta(seconds=300))
 
-    if args.dataset_option == 0:
-        dataset_train = point_cloud_dataset(num_points=8192)
-    elif args.dataset_option == 1:
-        dataset_train = point_cloud_dataset_no_DrivAerNet(num_points=8192)
-    elif args.dataset_option == 2:
-        dataset_train = point_cloud_dataset_no_train(num_points=8192)
-    elif args.dataset_option == 3:
-        dataset_train = point_cloud_dataset_no_Wings(num_points=8192)
-    elif args.dataset_option == 4:
-        dataset_train = point_cloud_dataset_no_NGAD(num_points=8192)
-    elif args.dataset_option == 5:
-        dataset_train = point_cloud_dataset_no_FlowBench(num_points=8192)
-    print(dataset_train.__len__())
+    datasets = []
+    if args.flowbench:
+        datasets.append(FlowBench_3D_LDC(data_root=args.flowbench_root, num_points=args.points, repeat=3, route=args.flowbench_route))
+    elif args.drivaernet:
+        datasets.append(get_datasets(dataset_path=args.drivaernet_root, num_points=args.points, route=args.drivaernet_route))
+    
+    dataset_train = ConcatDataset(datasets)
     sampler_train = torch.utils.data.distributed.DistributedSampler(dataset_train, seed=seed_value)
     loader_train = MultiEpochsDataLoader(dataset_train, batch_size=args.batchsize, shuffle=False, sampler=sampler_train, 
-                                    pin_memory=True, num_workers=args.workers, drop_last=True)
+                                        pin_memory=True, num_workers=args.workers)
     
-    # loader_train = get_dataloaders(
-    #     dataset_path='/data/home/zdhs0017/zoujunhong/data/DrivAerNet++/Pressure',
-    #     num_points=args.points,
-    #     batch_size=args.batchsize,
-    #     world_size=args.gpu_num,
-    #     rank=gpu,
-    #     num_workers=args.workers)
+    print('数据量：{}'.format(dataset_train.__len__()))
+        
     # load nets into gpu
-    model = Model(
-        depth=[8,8,8,8,8],
-        channels=[192,384,768,1536,3072],
-        num_points=[1024, 256, 64, 16],
-        k=16
-    )
+    if args.modelscale == '250m':
+        model = Model(
+            depth=[4, 4, 6, 12, 8],
+            channels=[64, 128, 256, 512, 1024],
+            num_points=[1024, 256, 64, 16],
+            out_channels=1,
+            cond_dims=2,
+            num_routes=3,
+            k=16)
+    elif args.modelscale == '1b':
+        model = Model(
+            depth=[4, 4, 6, 12, 8],
+            channels=[128, 256, 612, 1024, 2048],
+            num_points=[1024, 256, 64, 16],
+            out_channels=1,
+            cond_dims=2,
+            num_routes=3,
+            k=16)
+    elif args.modelscale == '2b':
+        model = Model(
+            depth=[8, 8, 8, 8, 8],
+            channels=[192, 384, 768, 1536, 3072],
+            num_points=[1024, 256, 64, 16],
+            out_channels=1,
+            cond_dims=2,
+            num_routes=3,
+            k=16)
+    elif args.modelscale == 'customize': # you can also customize your model parameter here
+        model = Model(
+            depth=[8, 8, 8, 8, 8],
+            channels=[192, 384, 768, 1536, 3072],
+            num_points=[1024, 256, 64, 16],
+            out_channels=1,
+            cond_dims=2,
+            num_routes=3,
+            k=16)
     
     def count_parameters(model):
         return sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -227,19 +239,27 @@ if __name__ == '__main__':
         description="PyTorch Semantic Segmentation Training"
     )
     parser.add_argument("--batchsize",type=int,default=2)
-    parser.add_argument("--workers",type=int,default=4)
+    parser.add_argument("--workers",type=int,default=8)
     parser.add_argument("--start_gpu",type=int,default=0)
     parser.add_argument("--gpu_num",type=int,default=4)
-    parser.add_argument("--lr",type=float,default=4e-5)
-    parser.add_argument("--saveroot",type=str,default='/data/home/zdhs0017/zoujunhong/model/savemodel/field/SAPT_Unified_pretrain_2b_p8192')
-    # parser.add_argument("--checkpoint",type=str,default='/data/home/zdhs0017/zoujunhong/model/savemodel/field/SAPT_Unified_pretrain_1b_p8192/model.pth')
-    parser.add_argument("--checkpoint",type=str,default='/data/home/zdhs0017/zoujunhong/model/savemodel/field/SAPT_DrivAerNet_scratch_pressure+coeff_2b_p8192/model.pth')
-    # parser.add_argument("--checkpoint",type=str,default='')
-    parser.add_argument("--total_epoch",type=int,default=30)
+    parser.add_argument("--lr",type=float,default=1e-4)
+    parser.add_argument("--saveroot",type=str,default='/path/to/cheakpoint_saveroot')
+    parser.add_argument("--checkpoint",type=str,default='')
+    parser.add_argument("--total_epoch",type=int,default=100)
     parser.add_argument("--resume_epoch",type=int,default=0)
     parser.add_argument("--save_step",type=int,default=5)
-    parser.add_argument("--dataset_option",type=int,default=0)
+    
+    parser.add_argument('--drivaernet', action='store_true') # whether to use drivaernet++
+    parser.add_argument('--drivaernet_root', type=str, default="/path/to/DrivAerNet++/Pressure") 
+    parser.add_argument('--drivaernet_route',type=int,default=0) # the route number of drivaernet++
+    
+    parser.add_argument('--flowbench', action='store_true')  # whether to use flowbench
+    parser.add_argument('--flowbench_root', type=str, default="/path/to/FlowBench/LDC_NS_3D/point_cloud/") 
+    parser.add_argument('--flowbench_route',type=int,default=2) # the route number of flowbench
+    
     parser.add_argument("--points",type=int,default=8192)
+    parser.add_argument("--modelscale", type=str, default="250m", choices=["250m", "1b", "2b", "customize"])
+    # for "customize" choice, specify the network hyperparameter at line 180
     
     parser.add_argument("--port",type=int,default=45325)
     args = parser.parse_args()
