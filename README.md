@@ -5,6 +5,8 @@
   <img src="images/architecture.png" alt="Overview of UniField" width="700">
 </p>
 
+> This repository is a sub-project of [the ScienceOne(S1) project](https://scienceone.cn/).
+
 > **UniField** is a universal sureface pressure field modeling framework that learns shared aerodynamic representations across heterogeneous domains — including cars, trains, aircraft, and general shapes — via **joint multi-domain training**.  
 > It integrates a *domain-agnostic geometric backbone* with *domain-specific Flow-Conditioned Adapters*, achieving cross-domain generalization.
 
@@ -146,3 +148,9 @@ For questions or collaborations, please contact:
 **Junhong Zou** – [zoujunhong2022@ia.ac.cn](mailto:zoujunhong2022@ia.ac.cn)
 
 
+---
+
+## 🙏 Acknowledgment
+
+This work was supported by the **PanShi Projec (ScienceOne(S1))**.
+We welcome other researchers to explore and utilize the [**ScienceOne Platform**](https://scienceone.cn/) for accelerating AI-driven scientific discovery.
