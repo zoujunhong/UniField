@@ -102,7 +102,7 @@ For training UniField-2B on DrivAerNet++ and FlowBench, run
 python train_UniField.py \
 --drivaernet --drivaernet_root /path/to/DrivAerNet++/Pressure \
 --flowbench --flowbench_root /path/to/FlowBench/LDC_NS_3D/point_cloud/ \
---modelscale 2b
+--saveroot /path/to/save/checkpoint --modelscale 2b
 ```
 Refer to the argparse in train_UniField.py for detailed settings.
 train_AdaField.py can be run in similar way for training model on single datasets.
