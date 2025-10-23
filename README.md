@@ -114,6 +114,7 @@ train_AdaField.py can be run in similar way for training model on single dataset
 For testing UniField-2B on DrivAerNet++ with 32768 points, run
 ```bash
 python test.py --modeltype UniField --modelscale 2b \
+--dataset drivaernet --data_root /path/to/DrivAerNet++/Pressure \
 --checkpoint_path /path/to/checkpoint --points 32768 --model_points 8192
 ```
 
