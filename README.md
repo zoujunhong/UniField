@@ -39,18 +39,14 @@ Refer to "DrivAerNet++: Pressure" in the download page for downloading surface p
 
 After download & extraction, the dataset should be organized in the following structure:
 
+```bash
 DrivAerNet++/
-
 ├── Pressure/
-
 │ ├── E_S_WW_WM_001.vtk
-
 │ ├── F_D_WM_WW_1022.vtk 
-
 │ ├── E_S_WWC_WM_374.vtk
-
 │ └── ...
-
+```
 
 ### **FlowBench**
 
@@ -60,15 +56,13 @@ DrivAerNet++/
 
 After download & extraction, the dataset should be organized in the following structure:
 
+```bash
 FlowBench/
-
 ├── LDC_NS_3D/
-
 │ ├── LDC_3d_X.npz
-
 │ ├── LDC_3d_Y.npz
-
 │── trans.py # copy the "trans.py" file in this repository to the dataset directory
+```
 
 run
 ```bash
