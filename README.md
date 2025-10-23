@@ -152,5 +152,5 @@ For questions or collaborations, please contact:
 
 ## 🙏 Acknowledgment
 
-This work was supported by the **PanShi Projec (ScienceOne(S1))**.
+This work was supported by the **PanShi Project (ScienceOne(S1))**.
 We welcome other researchers to explore and utilize the [**ScienceOne Platform**](https://scienceone.cn/) for accelerating AI-driven scientific discovery.
