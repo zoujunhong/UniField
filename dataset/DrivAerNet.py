@@ -12,11 +12,9 @@ import os
 import numpy as np
 import torch
 from torch.utils.data import Dataset, Subset, DataLoader
-import torch.distributed as dist
 import pyvista as pv
 import logging
 from utils_train import MultiEpochsDataLoader
-import pandas as pd
 
 class SurfacePressureDataset(Dataset):
     """

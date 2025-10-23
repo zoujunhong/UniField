@@ -5,7 +5,7 @@
   <img src="images/architecture.png" alt="Overview of UniField" width="700">
 </p>
 
-> **UniField** is a universal flow-field modeling framework that learns shared aerodynamic representations across heterogeneous domains — including cars, trains, aircraft, and general shapes — via **joint multi-domain training**.  
+> **UniField** is a universal sureface pressure field modeling framework that learns shared aerodynamic representations across heterogeneous domains — including cars, trains, aircraft, and general shapes — via **joint multi-domain training**.  
 > It integrates a *domain-agnostic geometric backbone* with *domain-specific Flow-Conditioned Adapters*, achieving cross-geometry and cross-velocity generalization.
 
 [[Paper]](https://arxiv.org/abs/xxxx.xxxxx)
@@ -25,6 +25,49 @@ Key features:
 
 ---
 
+## 📦 Dataset
+
+UniField leverages two public CFD datasets for training and evaluation.
+
+### **DrivAerNet++**
+[paper link](https://arxiv.org/abs/2406.09624)
+[download page](https://dataverse.harvard.edu/dataverse/DrivAerNet)
+
+Refer to "DrivAerNet++: Pressure" in the download page for downloading surface pressure field data.
+
+After download & extraction, the dataset should be organized in the following structure:
+
+DrivAerNet++/
+├── Pressure/
+│ ├── E_S_WW_WM_001.vtk
+│ ├── F_D_WM_WW_1022.vtk 
+│ ├── E_S_WWC_WM_374.vtk
+│ └── ...
+
+
+### **FlowBench**
+
+[paper link](https://arxiv.org/abs/2409.18032)
+[download page](https://huggingface.co/datasets/BGLab/FlowBench/tree/main)
+
+After download & extraction, the dataset should be organized in the following structure:
+
+FlowBench/
+├── LDC_NS_3D/
+│ ├── LDC_3d_X.npz
+│ ├── LDC_3d_Y.npz
+├── LDC_NS_2D/ # 2D data, not used in our work
+│── LDC_NSHT_2D_constant-Re/ # 2D data, not used in our work
+│── ...
+│── trans.py # copy the "trans.py" file in this repository to the dataset directory
+
+run
+```bash
+cd /path/to/dataset/directory
+python trans.py
+```
+for extracting surface pressure from volume data.
+
 ## 🚀 Usage
 
 ### Environment
@@ -33,6 +76,8 @@ Key features:
 |-------------|----------|
 | Python      | 3.12 |
 | PyTorch     | 2.6.0 + cu124 |
+| numpy       | 2.2.3 | 
+| pyvista     | 0.45.2 | 
 | CUDA GPU    | NVIDIA H100|
 
 You can create the environment as:
@@ -44,19 +89,27 @@ pip install torch==2.6.0+cu124 torchvision torchaudio --index-url https://downlo
 
 ---
 
+
 ### Training
 
+For training UniField-2B on DrivAerNet++ and FlowBench, run
 ```bash
-python train.py
+python train_UniField.py \
+--drivaernet --drivaernet_root /path/to/DrivAerNet++/Pressure \
+--flowbench --flowbench_root /path/to/FlowBench/LDC_NS_3D/point_cloud/ \
+--modelscale 2b
 ```
-
+Refer to the argparse in train_UniField.py for detailed settings.
+train_AdaField.py can be run in similar way for training model on single datasets.
 
 ---
 
 ### Testing
 
+For testing UniField-2B on DrivAerNet++ with 32768 points, run
 ```bash
-python test.py
+python test.py --modeltype UniField --modelscale 2b \
+--checkpoint_path /path/to/checkpoint --points 32768 --model_points 8192
 ```
 
 Evaluation results (MSE, MAE, RelL2, RelL1) will be shown in the command line.
@@ -65,11 +118,11 @@ Evaluation results (MSE, MAE, RelL2, RelL1) will be shown in the command line.
 
 ## 🧩 Checkpoints
 
-| Model Scale   | Parameters |  Download                          |
+| Model Scale   | Parameters |  Baidu Netdisk Download                          |
 | ------------- | ---------- |  --------------------------------- |
-| UniField-250M | 250M       |  [Download](https://www.baidu.com) |
-| UniField-1B   | 1B         |  [Download](https://www.baidu.com) |
-| UniField-2B   | 2B         |  [Download](https://www.baidu.com) |
+| UniField-250M | 250M       |  [Download](https://pan.baidu.com/s/1kYOlVPIEz_Vnyhb7bRhklw?pwd=sylx) |
+| UniField-1B   | 1B         |  [Download](https://pan.baidu.com/s/1wGF8tZ2wXQXm9FC9ElH2Gg?pwd=sylx) |
+| UniField-2B   | 2B         |  [Download](https://pan.baidu.com/s/18B_HWEmZUJXVxxOM5E8Gjg?pwd=sylx) |
 
 
 ---
