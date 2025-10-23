@@ -6,7 +6,7 @@
 </p>
 
 > **UniField** is a universal sureface pressure field modeling framework that learns shared aerodynamic representations across heterogeneous domains — including cars, trains, aircraft, and general shapes — via **joint multi-domain training**.  
-> It integrates a *domain-agnostic geometric backbone* with *domain-specific Flow-Conditioned Adapters*, achieving cross-geometry and cross-velocity generalization.
+> It integrates a *domain-agnostic geometric backbone* with *domain-specific Flow-Conditioned Adapters*, achieving cross-domain generalization.
 
 [[Paper]](https://arxiv.org/abs/xxxx.xxxxx)
 
@@ -15,7 +15,7 @@
 ## 🧭 Overview
 
 Traditional CFD simulations for aerodynamic analysis are computationally expensive and domain-specific.  
-**UniField** addresses this limitation by **jointly training on multiple aerodynamic subfields**, enabling the model to learn *universal surface pressure representations* that transfer across different flow regimes.
+**UniField** alleviates this limitation by **jointly training on multiple aerodynamic subfields**, enabling the model to learn *universal surface pressure representations* that transfer across different flow regimes.
 
 Key features:
 - **Unified Point Transformer backbone** for geometry encoding  
