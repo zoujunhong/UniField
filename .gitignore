@@ -1,0 +1,44 @@
+# Python cache
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Local agent/editor state
+.codex
+.agents/
+AGENTS.md
+
+# Runtime outputs
+demo/
+log/
+temp/
+nohup.out
+*.out
+
+# Checkpoints and large experiment artifacts
+*.pth
+*.pt
+*.ckpt
+*.safetensors
+checkpoint/
+checkpoints/
+savemodel/
+runs/
+wandb/
+
+# Data/cache artifacts
+*.npy
+*.npz
+*.vtk
+*.vtu
+*.vtp
+*.foam
+
+# Environment/local config
+.env
+.venv/
+venv/
+env/
