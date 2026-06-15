@@ -23,6 +23,8 @@ def clean_checkpoint_state_dict(checkpoint: Mapping[str, Any]) -> dict[str, torc
 
 
 _LEGACY_ENCODER_PREFIXES = (
+    "input_proj.",
+    "enc_stages.",
     "proj_in.",
     "proj_down_layers.",
     "proj_up_layers.",
@@ -37,6 +39,11 @@ _LEGACY_ENCODER_PREFIXES = (
     "adapt_up_proj_up_layers.",
 )
 
+_LEGACY_DECODER_PREFIXES = (
+    "dec_stages.",
+    "out_proj.",
+)
+
 
 def _add_legacy_query_aliases(
     source: dict[str, torch.Tensor],
@@ -47,6 +54,8 @@ def _add_legacy_query_aliases(
         if name.startswith(("encoder.", "decoder.")):
             continue
         if name.startswith("proj_out."):
+            alias = f"decoder.{name}"
+        elif name.startswith(_LEGACY_DECODER_PREFIXES):
             alias = f"decoder.{name}"
         elif name.startswith(_LEGACY_ENCODER_PREFIXES):
             alias = f"encoder.{name}"

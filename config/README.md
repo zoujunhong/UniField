@@ -105,7 +105,7 @@ CONFIG = {
 
 模型预设目录名，例如 `config/model/UniField_cross_attention/Medium.py`，只是实验预设名称。它不再要求 `model/UniField_cross_attention.py` 存在；实际完整模型统一由 `QueryUniField(encoder, decoder)` 拼接。
 
-AdaField / UniFieldV1 旧模型也使用同一格式：
+AdaField / UniFieldV1 / UniFieldV2 旧模型也使用同一格式：
 
 ```python
 CONFIG = {
@@ -122,6 +122,7 @@ CONFIG = {
 ```
 
 这类 legacy surface 模型的 `memory_dim` 会从 `encoder_kwargs["channels"][0]` 自动推断。
+UniFieldV2 使用 `embed_dims`，其中 `Large.py` 对应旧 `demo_DrivAerNet.py` 中的 `UniField_1210_2` checkpoint 配置。
 
 模型规模文件名固定为 `Small.py`、`Medium.py`、`Large.py`。
 

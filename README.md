@@ -6,6 +6,7 @@ This repository contains query-style neural field models for aerodynamic field p
 
 - **AdaField**: surface pressure modeling with SAPT and flow-conditioned adaptation.
 - **UniFieldV1**: first multi-domain UniField surface pressure model with parallel route adapters.
+- **UniFieldV2**: Swin-like one-dimensional window attention UniField used by the DrivAerNet demo checkpoint.
 - **QueryUniField**: the current encoder-decoder query framework for surface and volume field prediction.
 
 The codebase is organized around config-driven training. Datasets, models, losses, checkpointing, and visualization utilities are separated so experiments can be reproduced by changing a single Python config file.
@@ -39,6 +40,7 @@ Current example experiments include:
 
 - `config/experiment/DrivAerNet_AdaField_surfaceP.py`
 - `config/experiment/DrivAerNet_UniFieldV1_surfaceP.py`
+- `config/experiment/DrivAerNet_UniFieldV2_surfaceP.py`
 - `config/experiment/DrivAerNet_UniFieldCrossAttention_surfaceP_volumeU.py`
 
 ## Model System
@@ -60,11 +62,13 @@ Maintained encoder families:
 
 - `AdaFieldEncoder`: legacy AdaField SAPT backbone converted to dense surface memory.
 - `UniFieldV1Encoder`: legacy multi-route UniField backbone converted to dense surface memory.
+- `UniFieldV2Encoder`: legacy Swin-like window-attention UniField encoder converted to query memory.
 - `UniFieldEncoder`: current flow/manifold-aware encoder.
 
 Maintained decoder families:
 
 - `SurfacePressureDecoder`: surface-only pressure query decoder for AdaField and UniFieldV1.
+- `UniFieldV2Decoder`: legacy UniFieldV2 U-Net decoder adapted for surface query prediction.
 - `CrossAttentionDecoder`, `AnchorDecoder`, `MLPQueryDecoder`, `SelfAttentionDecoder`: query decoders for the current QueryUniField line.
 
 ## Dataset System
