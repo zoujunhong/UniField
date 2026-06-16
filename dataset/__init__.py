@@ -47,6 +47,16 @@ def build_dataset(config: dict[str, Any]):
     if isinstance(names, (list, tuple)):
         datasets = [_build_one_dataset(name, _kwargs_for_dataset(name, config)) for name in names]
         _check_concat_compatibility(datasets)
+        if bool(config.get("drop_empty", False)):
+            nonempty_datasets = [dataset for dataset in datasets if len(dataset) > 0]
+            if len(nonempty_datasets) < len(datasets):
+                print(
+                    f"Merged dataset: skipped {len(datasets) - len(nonempty_datasets)} empty dataset(s).",
+                    flush=True,
+                )
+            if not nonempty_datasets:
+                raise RuntimeError("Merged dataset has no samples after filtering incomplete or empty datasets.")
+            datasets = nonempty_datasets
         return ConcatDataset(datasets)
     raise TypeError("dataset config 'name' must be a string or a list of strings.")
 

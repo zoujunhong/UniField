@@ -45,6 +45,7 @@ class DrivAerNetPlusPlusDataset(Dataset):
         volume_target:  (Nvolume, Cvolume)
         cond:           (Ccond,)
         route:          scalar long tensor
+        coefficient_target: (Ccoeff,), always empty for DrivAerNet++.
     """
 
     def __init__(
@@ -59,6 +60,7 @@ class DrivAerNetPlusPlusDataset(Dataset):
         surface_input_list: list[str] | tuple[str, ...] | None = None,
         surface_target_list: list[str] | tuple[str, ...] | None = ("p",),
         volume_target_list: list[str] | tuple[str, ...] | None = ("U",),
+        coefficient_target_list: list[str] | tuple[str, ...] | None = None,
         surface_sampling: str = "random",
         surface_cache_points: int = DEFAULT_SURFACE_CACHE_POINTS,
         volume_cache_points: int = DEFAULT_VOLUME_CACHE_POINTS,
@@ -101,6 +103,9 @@ class DrivAerNetPlusPlusDataset(Dataset):
         self.surface_input_list = ensure_xyz_prefix(surface_input_list, ("xyz", "normal", "area"))
         self.surface_target_list = list(surface_target_list or [])
         self.volume_target_list = list(volume_target_list or [])
+        self.coefficient_target_list = list(coefficient_target_list or [])
+        if self.coefficient_target_list:
+            raise ValueError("DrivAerNet++ does not provide coefficient_target_list labels.")
         self.num_surface_points = int(num_surface_points)
         self.num_surface_query_points = self.num_surface_points if num_surface_query_points is None else int(num_surface_query_points)
         self.num_query_points = int(num_query_points)
@@ -108,6 +113,7 @@ class DrivAerNetPlusPlusDataset(Dataset):
             tuple(self.surface_input_list),
             tuple(self.surface_target_list),
             tuple(self.volume_target_list),
+            tuple(self.coefficient_target_list),
             self.num_surface_points,
             self.num_surface_query_points,
             self.num_query_points,
@@ -186,6 +192,7 @@ class DrivAerNetPlusPlusDataset(Dataset):
             torch.from_numpy(volume_target).float(),
             torch.from_numpy(self.cond.copy()).float(),
             torch.tensor(self.route, dtype=torch.long),
+            torch.zeros((0,), dtype=torch.float32),
         )
 
 

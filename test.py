@@ -7,7 +7,7 @@ import torch
 from dataset import build_dataset
 from model import build_model
 from train import load_main_config
-from utils.checkpoint import load_model_weights
+from utils.checkpoint import load_model_weights, resolve_eval_checkpoint
 from utils.config import dataset_config_for_phase
 from utils.metrics import MetricAccumulator, format_metrics
 from utils.task import build_query, move_batch_to_device, prediction_field, target_field
@@ -47,16 +47,18 @@ def denormalize(
         if dataset in {"HighSpeedTrain", "CRH450", "Maglev"}:
             if batch is None:
                 raise ValueError("HighSpeedTrain physical denormalization needs batch['cond'].")
-            free_stream, speed = _high_speed_from_cond(batch["cond"])
+            _, speed = _high_speed_from_cond(batch["cond"])
             speed = speed.view(-1, 1, 1)
             if field == "p":
                 return values * (0.5 * speed * speed)
             if field == "U":
-                return values * speed + free_stream.view(-1, 1, 3)
+                return values * speed
             if field == "k":
-                return values * speed * speed
-            if field in {"omega", "nut"}:
-                return values
+                return values * (0.01 * speed * speed)
+            if field == "omega":
+                return values * (100.0 * speed)
+            if field == "nut":
+                return values * (0.01 * speed)
     raise ValueError(f"Unsupported denormalize spec for {field}: {spec}")
 
 
@@ -87,9 +89,10 @@ def evaluate(config: dict) -> None:
     )
 
     model = build_model(config["model"]).to(device).float().eval()
-    if test_config.get("checkpoint"):
-        load_model_weights(model, test_config["checkpoint"], strict=True)
-        print("checkpoint loaded", flush=True)
+    checkpoint = resolve_eval_checkpoint(config, "test")
+    if checkpoint:
+        load_model_weights(model, checkpoint, strict=True)
+        print(f"checkpoint loaded: {checkpoint}", flush=True)
     else:
         print("no checkpoint configured; running random-init smoke", flush=True)
 
@@ -143,6 +146,8 @@ def evaluate(config: dict) -> None:
                 tgt = target_field(batch["surface_target"], task_config["surface_target_list"], field)
             elif domain == "volume":
                 tgt = target_field(batch["volume_target"], task_config["volume_target_list"], field)
+            elif domain == "coefficients":
+                tgt = target_field(batch["coefficient_target"], task_config["coefficient_target_list"], field)
             else:
                 raise ValueError(f"Unsupported domain: {domain}")
             meters.setdefault(key, MetricAccumulator()).update(pred_field, tgt)

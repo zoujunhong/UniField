@@ -68,6 +68,19 @@ def load_model_weights(
     return model
 
 
+def resolve_eval_checkpoint(config: dict, phase: str) -> str:
+    phase_config = config.get(phase, {})
+    checkpoint = str(phase_config.get("checkpoint", ""))
+    if checkpoint:
+        return checkpoint
+    train_config = config.get("train", {})
+    saveroot = train_config.get("saveroot")
+    total_epoch = train_config.get("total_epoch")
+    if not saveroot or total_epoch is None:
+        return ""
+    return str(Path(saveroot) / f"model_epoch_{int(total_epoch)}.pth")
+
+
 def save_checkpoint(model: torch.nn.Module, save_dir: str | Path, epoch: int, filename: str | None = None) -> Path:
     save_dir = Path(save_dir)
     os.makedirs(save_dir, exist_ok=True)

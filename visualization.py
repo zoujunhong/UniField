@@ -10,9 +10,9 @@ from dataset import build_dataset
 from model import build_model
 from test import denormalize
 from train import load_main_config
-from utils.checkpoint import load_model_weights
+from utils.checkpoint import load_model_weights, resolve_eval_checkpoint
 from utils.config import dataset_config_for_phase
-from utils.task import build_query, move_batch_to_device, prediction_field, target_field
+from utils.task import build_query, coefficient_prediction, move_batch_to_device, prediction_field, query_prediction, target_field
 from utils.visualization import save_prediction_npz, scatter_scalar, scatter_volume_slice, to_numpy
 
 
@@ -43,9 +43,10 @@ def run_visualization(config: dict) -> None:
     )
 
     model = build_model(config["model"]).to(device).float().eval()
-    if vis_config.get("checkpoint"):
-        load_model_weights(model, vis_config["checkpoint"], strict=True)
-        print("checkpoint loaded", flush=True)
+    checkpoint = resolve_eval_checkpoint(config, "visualization")
+    if checkpoint:
+        load_model_weights(model, checkpoint, strict=True)
+        print(f"checkpoint loaded: {checkpoint}", flush=True)
     else:
         print("no checkpoint configured; running random-init visualization smoke", flush=True)
 
@@ -64,6 +65,8 @@ def run_visualization(config: dict) -> None:
         area=batch["area"],
         query_chunk_size=int(vis_config.get("query_chunk_size", 50000)),
     )
+    query_pred = query_prediction(pred)
+    coeff_pred = coefficient_prediction(pred)
 
     surface_count = int(batch["surface_query"].shape[1])
     output_dir = vis_config.get("output_dir")
@@ -75,10 +78,13 @@ def run_visualization(config: dict) -> None:
     arrays = {
         "surface_query": to_numpy(batch["surface_query"][0]),
         "volume_query": to_numpy(batch["volume_query"][0]),
-        "prediction": to_numpy(pred[0]),
+        "prediction": to_numpy(query_pred[0]),
         "surface_target": to_numpy(batch["surface_target"][0]),
         "volume_target": to_numpy(batch["volume_target"][0]),
+        "coefficient_target": to_numpy(batch["coefficient_target"][0]),
     }
+    if coeff_pred is not None:
+        arrays["coefficient_prediction"] = to_numpy(coeff_pred[0])
     save_prediction_npz(output_dir / "summary.npz", **arrays)
 
     max_points = int(vis_config.get("max_points", 20000))
@@ -113,6 +119,10 @@ def run_visualization(config: dict) -> None:
                 scatter_volume_slice(output_dir / f"volume_{suffix}_target.png", xyz, tgt_np[:, channel], f"volume {suffix} target")
                 scatter_volume_slice(output_dir / f"volume_{suffix}_pred.png", xyz, pred_np[:, channel], f"volume {suffix} pred")
                 scatter_volume_slice(output_dir / f"volume_{suffix}_error.png", xyz, pred_np[:, channel] - tgt_np[:, channel], f"volume {suffix} error")
+        elif domain == "coefficients":
+            continue
+        else:
+            raise ValueError(f"Unsupported domain: {domain}")
 
     print(f"visualization saved to: {output_dir}", flush=True)
 

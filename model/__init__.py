@@ -36,17 +36,24 @@ def build_model(config: dict[str, Any]) -> QueryUniField:
     decoder_name = config["decoder_name"]
     encoder_kwargs = dict(config.get("encoder_kwargs", {}))
     decoder_kwargs = dict(config.get("decoder_kwargs", {}))
+    coefficient_head_kwargs = config.get("coefficient_head_kwargs")
+    if coefficient_head_kwargs is not None:
+        coefficient_head_kwargs = dict(coefficient_head_kwargs)
 
     encoder_cls = _resolve_class("model.Encoder", encoder_name)
     decoder_cls = _resolve_class("model.Decoder", decoder_name)
 
-    decoder_kwargs.setdefault("memory_dim", _encoder_memory_dim(encoder_kwargs))
+    memory_dim = _encoder_memory_dim(encoder_kwargs)
+    decoder_kwargs.setdefault("memory_dim", memory_dim)
+    if coefficient_head_kwargs is not None:
+        coefficient_head_kwargs.setdefault("in_dim", memory_dim)
     encoder = encoder_cls(**encoder_kwargs)
     decoder = decoder_cls(**decoder_kwargs)
     return QueryUniField(
         encoder,
         decoder,
         default_query_chunk_size=int(config.get("default_query_chunk_size", decoder_kwargs.get("default_query_chunk_size", 50_000))),
+        coefficient_head_kwargs=coefficient_head_kwargs,
     )
 
 

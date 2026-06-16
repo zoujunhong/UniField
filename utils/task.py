@@ -6,7 +6,17 @@ import torch
 import torch.nn.functional as F
 
 
-FIELD_DIMS = {"p": 1, "U": 3, "k": 1, "omega": 1, "nut": 1}
+FIELD_DIMS = {
+    "p": 1,
+    "U": 3,
+    "k": 1,
+    "omega": 1,
+    "nut": 1,
+    "Cd": 1,
+    "Cl": 1,
+    "Cs": 1,
+    "Cm_overturn": 1,
+}
 
 
 def split_surface_input(surface_input: torch.Tensor, surface_input_list: list[str]):
@@ -63,7 +73,13 @@ def build_query(surface_query: torch.Tensor, volume_query: torch.Tensor, add_typ
 
 
 def move_batch_to_device(batch, device: int | torch.device, surface_input_list: list[str]) -> dict[str, torch.Tensor | None]:
-    surface_input, surface_query, surface_target, volume_query, volume_target, cond, routes = batch
+    if len(batch) == 7:
+        surface_input, surface_query, surface_target, volume_query, volume_target, cond, routes = batch
+        coefficient_target = torch.zeros((surface_input.shape[0], 0), dtype=surface_input.dtype)
+    elif len(batch) == 8:
+        surface_input, surface_query, surface_target, volume_query, volume_target, cond, routes, coefficient_target = batch
+    else:
+        raise ValueError(f"Expected dataset batch with 7 or 8 items, got {len(batch)}.")
     surface_input = surface_input.float().to(device, non_blocking=True)
     surface_pos, normals, area = split_surface_input(surface_input, surface_input_list)
     return {
@@ -75,24 +91,41 @@ def move_batch_to_device(batch, device: int | torch.device, surface_input_list: 
         "surface_target": surface_target.float().to(device, non_blocking=True),
         "volume_query": volume_query.float().to(device, non_blocking=True),
         "volume_target": volume_target.float().to(device, non_blocking=True),
+        "coefficient_target": coefficient_target.float().to(device, non_blocking=True),
         "cond": cond.float().to(device, non_blocking=True),
         "routes": routes.long().to(device, non_blocking=True),
     }
 
 
+def query_prediction(pred) -> torch.Tensor:
+    if isinstance(pred, dict):
+        return pred["query"]
+    return pred
+
+
+def coefficient_prediction(pred) -> torch.Tensor | None:
+    if isinstance(pred, dict):
+        return pred.get("coefficients")
+    return None
+
+
 def compute_query_loss(
-    pred: torch.Tensor,
+    pred,
     batch: dict[str, torch.Tensor | None],
     task_config: dict[str, Any],
 ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+    query_pred = query_prediction(pred)
+    coeff_pred = coefficient_prediction(pred)
     surface_count = int(batch["surface_query"].shape[1])
-    surface_pred = pred[:, :surface_count]
-    volume_pred = pred[:, surface_count:]
+    surface_pred = query_pred[:, :surface_count]
+    volume_pred = query_pred[:, surface_count:]
     surface_target = batch["surface_target"]
     volume_target = batch["volume_target"]
+    coefficient_target = batch["coefficient_target"]
     surface_slices = field_slices(task_config.get("surface_target_list", []))
     volume_slices = field_slices(task_config.get("volume_target_list", []))
-    total = pred.new_zeros(())
+    coefficient_slices = field_slices(task_config.get("coefficient_target_list", []))
+    total = query_pred.new_zeros(())
     losses: dict[str, torch.Tensor] = {}
 
     for item in task_config.get("losses", []):
@@ -110,6 +143,13 @@ def compute_query_loss(
                 continue
             target_slice = volume_slices[field]
             value = F.l1_loss(volume_pred[..., pred_slice], volume_target[..., target_slice])
+        elif domain == "coefficients":
+            if coeff_pred is None:
+                raise ValueError("Model output does not include coefficient predictions.")
+            if coefficient_target.shape[-1] == 0:
+                continue
+            target_slice = coefficient_slices[field]
+            value = F.l1_loss(coeff_pred[..., pred_slice], coefficient_target[..., target_slice])
         else:
             raise ValueError(f"Unsupported loss domain: {domain}")
         losses[f"{domain}_{field}"] = value
@@ -118,15 +158,21 @@ def compute_query_loss(
     return total, losses
 
 
-def prediction_field(pred: torch.Tensor, domain: str, field: str, task_config: dict[str, Any], surface_count: int) -> torch.Tensor:
+def prediction_field(pred, domain: str, field: str, task_config: dict[str, Any], surface_count: int) -> torch.Tensor:
     items = [item for item in task_config.get("losses", []) if item["domain"] == domain and item["field"] == field]
     if not items:
         raise KeyError(f"No prediction slice configured for {domain}:{field}")
     pred_slice = slice(*items[0]["pred_slice"])
+    query_pred = query_prediction(pred)
     if domain == "surface":
-        return pred[:, :surface_count, pred_slice]
+        return query_pred[:, :surface_count, pred_slice]
     if domain == "volume":
-        return pred[:, surface_count:, pred_slice]
+        return query_pred[:, surface_count:, pred_slice]
+    if domain == "coefficients":
+        coeff_pred = coefficient_prediction(pred)
+        if coeff_pred is None:
+            raise ValueError("Model output does not include coefficient predictions.")
+        return coeff_pred[..., pred_slice]
     raise ValueError(f"Unsupported domain: {domain}")
 
 

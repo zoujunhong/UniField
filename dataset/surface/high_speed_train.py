@@ -5,7 +5,7 @@ import os
 import numpy as np
 
 from dataset.cache.high_speed_train import DEFAULT_SURFACE_CACHE_POINTS, cache_path, normalized_train_type
-from dataset.utils.load import ensure_xyz_prefix, high_speed_free_stream, parse_high_speed_case_cond
+from dataset.utils.load import ensure_xyz_prefix, parse_high_speed_case_cond
 from dataset.utils.normalization import normalize_high_speed_field
 from dataset.utils.sampling import sample_rows_np
 
@@ -57,19 +57,18 @@ class HighSpeedTrainSurfaceDataset:
     def _field(self, rows: np.ndarray, name: str, case_name: str) -> np.ndarray:
         cond, speed = parse_high_speed_case_cond(case_name)
         del cond
-        free_stream = high_speed_free_stream(case_name)
         if name == "xyz":
             return rows[:, :3]
         if name == "p":
-            return normalize_high_speed_field("p", rows[:, 3:4], self.normalization, free_stream, speed, self.clamp_cp)
+            return normalize_high_speed_field("p", rows[:, 3:4], self.normalization, speed, self.clamp_cp)
         if name == "U":
-            return normalize_high_speed_field("U", rows[:, 4:7], self.normalization, free_stream, speed, self.clamp_cp)
+            return normalize_high_speed_field("U", rows[:, 4:7], self.normalization, speed, self.clamp_cp)
         if name == "k":
-            return normalize_high_speed_field("k", rows[:, 7:8], self.normalization, free_stream, speed, self.clamp_cp)
+            return normalize_high_speed_field("k", rows[:, 7:8], self.normalization, speed, self.clamp_cp)
         if name == "omega":
-            return normalize_high_speed_field("omega", rows[:, 8:9], self.normalization, free_stream, speed, self.clamp_cp)
+            return normalize_high_speed_field("omega", rows[:, 8:9], self.normalization, speed, self.clamp_cp)
         if name == "nut":
-            return normalize_high_speed_field("nut", rows[:, 9:10], self.normalization, free_stream, speed, self.clamp_cp)
+            return normalize_high_speed_field("nut", rows[:, 9:10], self.normalization, speed, self.clamp_cp)
         if name in {"normal", "normals"}:
             if rows.shape[1] >= 13:
                 return rows[:, 10:13]

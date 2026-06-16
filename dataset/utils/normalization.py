@@ -51,7 +51,6 @@ def normalize_high_speed_field(
     name: str,
     values: np.ndarray,
     normalization: str,
-    free_stream: np.ndarray,
     speed: float,
     clamp_cp: tuple[float, float] | None = (-5.0, 1.05),
 ) -> np.ndarray:
@@ -69,9 +68,11 @@ def normalize_high_speed_field(
             values = np.clip(values, clamp_cp[0], clamp_cp[1])
         return values
     if name == "U":
-        return (values - free_stream.reshape(1, 3).astype(np.float32)) / speed_scale
+        return values / speed_scale
     if name == "k":
-        return values / max(speed_scale * speed_scale, 1e-12)
-    if name in {"omega", "nut"}:
-        return values
+        return values / max(0.01 * speed_scale * speed_scale, 1e-12)
+    if name == "omega":
+        return values / max(100.0 * speed_scale, 1e-12)
+    if name == "nut":
+        return values / max(0.01 * speed_scale, 1e-12)
     return values

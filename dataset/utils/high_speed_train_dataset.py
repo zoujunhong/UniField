@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 import os
+from pathlib import Path
 
 import numpy as np
 import torch
@@ -19,7 +21,7 @@ from dataset.cache.high_speed_train import (
 )
 from dataset.surface.base import EmptySurfaceDataset
 from dataset.surface.high_speed_train import HighSpeedTrainSurfaceDataset
-from dataset.utils.load import ensure_xyz_prefix, list_high_speed_cases, parse_high_speed_case_cond
+from dataset.utils.load import ensure_xyz_prefix, high_speed_type_dir, list_high_speed_cases, parse_high_speed_case_cond
 from dataset.utils.sampling import filter_names, rng_for_index
 from dataset.volume.base import EmptyVolumeDataset
 from dataset.volume.high_speed_train import HighSpeedTrainVolumeDataset
@@ -37,6 +39,38 @@ HIGH_SPEED_FIELD_MIN_COLS = {
     "area": 14,
     "log_area": 14,
 }
+HIGH_SPEED_COEFFICIENT_FIELDS = ("Cd", "Cl", "Cs", "Cm_overturn")
+
+
+def validate_high_speed_coefficient_fields(fields: list[str] | tuple[str, ...]) -> None:
+    unsupported = [field for field in fields if field not in HIGH_SPEED_COEFFICIENT_FIELDS]
+    if unsupported:
+        raise KeyError(f"Unsupported HighSpeedTrain coefficient fields: {unsupported}")
+
+
+def read_high_speed_coefficients(case_dir: str | Path, fields: list[str] | tuple[str, ...]) -> np.ndarray:
+    fields = list(fields or [])
+    if not fields:
+        return np.zeros((0,), dtype=np.float32)
+    validate_high_speed_coefficient_fields(fields)
+    path = Path(case_dir) / "force_summary.json"
+    with open(path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    coefficients = data.get("coefficients", {})
+    values = []
+    for field in fields:
+        if field not in coefficients:
+            raise KeyError(f"Coefficient '{field}' not found in {path}.")
+        values.append(float(coefficients[field]))
+    return np.asarray(values, dtype=np.float32)
+
+
+def complete_high_speed_coefficients(case_dir: str | Path, fields: list[str] | tuple[str, ...]) -> bool:
+    try:
+        values = read_high_speed_coefficients(case_dir, fields)
+    except Exception:
+        return False
+    return bool(np.all(np.isfinite(values)))
 
 
 def _required_high_speed_cols(fields: list[str] | tuple[str, ...]) -> int:
@@ -88,6 +122,7 @@ def _split_high_speed_names_by_geometry(
 
 def _complete_high_speed_cache_case(
     case_name: str,
+    root_dir: str,
     cache_root: str,
     train_type: str,
     use_surface: bool,
@@ -98,6 +133,7 @@ def _complete_high_speed_cache_case(
     surface_input_list: list[str],
     surface_target_list: list[str],
     volume_target_list: list[str],
+    coefficient_target_list: list[str],
 ) -> bool:
     if use_surface:
         min_cols = _required_high_speed_cols([*surface_input_list, *surface_target_list])
@@ -109,6 +145,10 @@ def _complete_high_speed_cache_case(
         min_cols = _required_high_speed_cols(["xyz", *volume_target_list])
         path = cache_path(cache_root, train_type, "volume_random", volume_cache_points, case_name)
         if not valid_npy_cache(path, min_cols=min_cols):
+            return False
+    if coefficient_target_list:
+        type_dir = high_speed_type_dir(root_dir, train_type)
+        if not complete_high_speed_coefficients(type_dir / case_name, coefficient_target_list):
             return False
     return True
 
@@ -127,6 +167,7 @@ class HighSpeedTrainDatasetBase(Dataset):
         surface_input_list: list[str] | tuple[str, ...] | None = None,
         surface_target_list: list[str] | tuple[str, ...] | None = ("p",),
         volume_target_list: list[str] | tuple[str, ...] | None = ("U",),
+        coefficient_target_list: list[str] | tuple[str, ...] | None = None,
         surface_sampling: str = "random",
         surface_cache_points: int = DEFAULT_SURFACE_CACHE_POINTS,
         volume_cache_points: int = DEFAULT_VOLUME_CACHE_POINTS,
@@ -135,6 +176,7 @@ class HighSpeedTrainDatasetBase(Dataset):
         val_ratio: float = 0.1,
         geometry_count: int | None = None,
         skip_incomplete: bool = True,
+        allow_empty: bool = False,
         repeat: int = 1,
         normalization: str = "physical",
         center_x: bool = True,
@@ -158,11 +200,14 @@ class HighSpeedTrainDatasetBase(Dataset):
         self.center_x = bool(center_x)
         self.route = int(route)
         self.skip_incomplete = bool(skip_incomplete)
+        self.allow_empty = bool(allow_empty)
         self.deterministic = bool(deterministic)
         self.seed = int(seed)
         self.surface_input_list = ensure_xyz_prefix(surface_input_list, ("xyz", "normal", "area"))
         self.surface_target_list = list(surface_target_list or [])
         self.volume_target_list = list(volume_target_list or [])
+        self.coefficient_target_list = list(coefficient_target_list or [])
+        validate_high_speed_coefficient_fields(self.coefficient_target_list)
         self.num_surface_points = int(num_surface_points)
         self.num_surface_query_points = self.num_surface_points if num_surface_query_points is None else int(num_surface_query_points)
         self.num_query_points = int(num_query_points)
@@ -170,6 +215,7 @@ class HighSpeedTrainDatasetBase(Dataset):
             tuple(self.surface_input_list),
             tuple(self.surface_target_list),
             tuple(self.volume_target_list),
+            tuple(self.coefficient_target_list),
             self.num_surface_points,
             self.num_surface_query_points,
             self.num_query_points,
@@ -191,6 +237,7 @@ class HighSpeedTrainDatasetBase(Dataset):
                 for name in names
                 if _complete_high_speed_cache_case(
                     name,
+                    root_dir,
                     self.cache_root,
                     self.train_type,
                     self.use_surface,
@@ -201,6 +248,7 @@ class HighSpeedTrainDatasetBase(Dataset):
                     self.surface_input_list,
                     self.surface_target_list,
                     self.volume_target_list,
+                    self.coefficient_target_list,
                 )
             ]
             skipped = split_case_count - len(names)
@@ -213,11 +261,14 @@ class HighSpeedTrainDatasetBase(Dataset):
                 )
         self.case_names = names
         if not self.case_names:
-            raise RuntimeError(
+            message = (
                 "No complete HighSpeedTrain cases available for "
                 f"train_type={self.train_type}, split={split}. "
                 f"cache_root={self.cache_root}. Build caches first or set skip_incomplete=False."
             )
+            if not self.allow_empty:
+                raise RuntimeError(message)
+            print(f"HighSpeedTrain dataset warning: {message}", flush=True)
 
         if self.use_surface:
             self.surface = HighSpeedTrainSurfaceDataset(
@@ -266,6 +317,8 @@ class HighSpeedTrainDatasetBase(Dataset):
 
         surface_input, surface_query, surface_target = self.surface.sample(case_name, rng)
         volume_query, volume_target = self.volume.sample(case_name, rng)
+        type_dir = high_speed_type_dir(self.root_dir, self.train_type)
+        coefficient_target = read_high_speed_coefficients(type_dir / case_name, self.coefficient_target_list)
 
         if self.center_x and surface_input.shape[0] > 0:
             x_center = 0.5 * (surface_input[:, 0].max() + surface_input[:, 0].min())
@@ -286,4 +339,5 @@ class HighSpeedTrainDatasetBase(Dataset):
             torch.from_numpy(volume_target).float(),
             torch.from_numpy(cond.copy()).float(),
             torch.tensor(self.route, dtype=torch.long),
+            torch.from_numpy(coefficient_target).float(),
         )
