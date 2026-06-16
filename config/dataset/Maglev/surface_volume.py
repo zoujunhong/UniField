@@ -11,7 +11,6 @@ CONFIG = {
         "volume_target_list": ["U"],
         "surface_sampling": "random",
         "normalization": "physical",
-        "split": "train",
         "repeat": 1,
         "route": 2,
     },

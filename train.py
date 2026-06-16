@@ -11,7 +11,7 @@ import torch.multiprocessing as mp
 from dataset import build_dataset
 from model import build_model
 from utils.checkpoint import load_model_weights, save_checkpoint
-from utils.config import load_config, resolve_path
+from utils.config import dataset_config_for_phase, load_config, resolve_path
 from utils.dataloader import MultiEpochsDataLoader
 from utils.distributed import cleanup_distributed, is_main_process, set_seed, setup_distributed
 from utils.metrics import AverageMeter
@@ -104,7 +104,7 @@ def main_worker(local_rank: int, config: dict) -> None:
     if is_main_process():
         print("===== config loaded =====", flush=True)
         print("===== dataset loading ... =====", flush=True)
-    dataset = build_dataset(config["dataset"])
+    dataset = build_dataset(dataset_config_for_phase(config, "train"))
     sampler = None
     shuffle = True
     if dist.is_available() and dist.is_initialized():

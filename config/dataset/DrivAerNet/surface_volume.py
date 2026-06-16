@@ -11,7 +11,6 @@ CONFIG = {
         "volume_target_list": ["U"],
         "surface_sampling": "random",
         "normalization": "standard",
-        "ids_file": "/data/group/project1/CFD/DrivAerNet++/train_design_ids.txt",
         "repeat": 1,
         "route": 0,
     },

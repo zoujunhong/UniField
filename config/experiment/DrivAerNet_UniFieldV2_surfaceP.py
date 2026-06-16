@@ -31,6 +31,9 @@ CONFIG = {
         },
     },
     "train": {
+        "dataset_kwargs": {
+            "ids_file": "/data/group/project1/CFD/DrivAerNet++/train_design_ids.txt",
+        },
         "batch_size": 1,
         "workers": 4,
         "lr": 1e-4,
@@ -48,6 +51,9 @@ CONFIG = {
         "dry_run_iters": 0,
     },
     "test": {
+        "dataset_kwargs": {
+            "ids_file": "/data/group/project1/CFD/DrivAerNet++/val_design_ids.txt",
+        },
         "checkpoint": "/data/home/zdhs0017/zoujunhong/model/savemodel/field/UniField0109_Unified_randomsort/model.pth",
         "batch_size": 1,
         "workers": 4,
@@ -56,6 +62,9 @@ CONFIG = {
         "log_interval": 20,
     },
     "visualization": {
+        "dataset_kwargs": {
+            "ids_file": "/data/group/project1/CFD/DrivAerNet++/val_design_ids.txt",
+        },
         "checkpoint": "/data/home/zdhs0017/zoujunhong/model/savemodel/field/UniField0109_Unified_randomsort/model.pth",
         "batch_size": 1,
         "workers": 0,

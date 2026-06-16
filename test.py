@@ -8,6 +8,7 @@ from dataset import build_dataset
 from model import build_model
 from train import load_main_config
 from utils.checkpoint import load_model_weights
+from utils.config import dataset_config_for_phase
 from utils.metrics import MetricAccumulator, format_metrics
 from utils.task import build_query, move_batch_to_device, prediction_field, target_field
 
@@ -67,10 +68,14 @@ def evaluate(config: dict) -> None:
     torch.set_float32_matmul_precision(runtime_config.get("matmul_precision", "high"))
     device = torch.device("cuda", 0) if torch.cuda.is_available() else torch.device("cpu")
 
-    ds_config = config["dataset"].copy()
-    ds_config["kwargs"] = dict(ds_config.get("kwargs", {}))
-    ds_config["kwargs"]["deterministic"] = True
-    ds_config["kwargs"]["seed"] = int(runtime_config.get("seed", 200099))
+    ds_config = dataset_config_for_phase(
+        config,
+        "test",
+        {
+            "deterministic": True,
+            "seed": int(runtime_config.get("seed", 200099)),
+        },
+    )
     dataset = build_dataset(ds_config)
     loader = torch.utils.data.DataLoader(
         dataset,

@@ -72,3 +72,12 @@ CONFIG = {
 ```
 
 Merged datasets must have identical `surface_input_list`, `surface_target_list`, `volume_target_list`, and sample counts.
+
+Dataset option configs should describe the data shape, fields, sampling counts, normalization, and route id. Stage-specific splits belong in the experiment config:
+
+```python
+"train": {"dataset_kwargs": {"ids_file": ".../train_design_ids.txt"}},
+"test": {"dataset_kwargs": {"ids_file": ".../val_design_ids.txt"}},
+```
+
+For CRH450 and Maglev, `{"split": "train"}` selects cases by geometry id: CRH450 `geo_1`-`geo_18` and Maglev `geo_1`-`geo_27`. `{"split": "test"}` or `{"split": "val"}` selects CRH450 `geo_19`-`geo_20` and Maglev `geo_28`-`geo_30`. Incomplete or partially written high-speed cache files are skipped by default.

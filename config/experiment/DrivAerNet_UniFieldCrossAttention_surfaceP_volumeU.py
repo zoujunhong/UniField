@@ -38,6 +38,9 @@ CONFIG = {
         },
     },
     "train": {
+        "dataset_kwargs": {
+            "ids_file": "/data/group/project1/CFD/DrivAerNet++/train_design_ids.txt",
+        },
         "batch_size": 4,
         "workers": 4,
         "lr": 1e-4,
@@ -55,7 +58,10 @@ CONFIG = {
         "dry_run_iters": 0,
     },
     "test": {
-        "checkpoint": "",
+        "dataset_kwargs": {
+            "ids_file": "/data/group/project1/CFD/DrivAerNet++/val_design_ids.txt",
+        },
+        "checkpoint": "/data/home/zdhs0017/zoujunhong/model/savemodel/field/DrivAerNet_UniFieldCrossAttention_surfaceP_volumeU/model_epoch_200.pth",
         "batch_size": 1,
         "workers": 4,
         "query_chunk_size": 50000,
@@ -63,6 +69,9 @@ CONFIG = {
         "log_interval": 20,
     },
     "visualization": {
+        "dataset_kwargs": {
+            "ids_file": "/data/group/project1/CFD/DrivAerNet++/val_design_ids.txt",
+        },
         "checkpoint": "",
         "batch_size": 1,
         "workers": 0,
