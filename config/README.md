@@ -16,6 +16,12 @@ CONFIG = {...}
 
 命令行参数不会覆盖 config 内容；新实验建议复制一个 config 文件后修改。
 
+## 编写约定
+
+- 新建或整理 config 时，直接写完整 `CONFIG` 字典。
+- 不要通过 `from ... import CONFIG as BASE_CONFIG`、`deepcopy(BASE_CONFIG)` 等方式派生 config。
+- 如果两个实验只差少量字段，也优先复制完整 config 后显式修改，保证单个 config 文件能独立说明训练内容。
+
 ## 目录规则
 
 ```text
@@ -176,6 +182,22 @@ DrivAerNet++ 示例：
 
 CRH450 / Maglev 按 case 名中的 `geo_<编号>` 切分：CRH450 的 `geo_1`-`geo_18` 训练、`geo_19`-`geo_20` 测试和可视化；Maglev 的 `geo_1`-`geo_27` 训练、`geo_28`-`geo_30` 测试和可视化。高铁 dataset 默认会跳过当前阶段缺失或尚未写完整 cache 的 case。
 
+高铁实验 config 命名从现在起统一使用短前缀 `HighSpeedTrain_...`，例如：
+
+```text
+config/experiment/HighSpeedTrain_TripNet_volumeAll.py
+config/experiment/HighSpeedTrain_UniFieldCrossAttention_volumeRANS_MAERMSE.py
+config/experiment/HighSpeedTrain_Gaussian3D_MortonShift_volumeAll.py
+```
+
+旧的 `HighSpeedTrain_CRH450_Maglev_...` config 已清理；如需复现实验，请使用短前缀入口。
+
+TripNet 复现实验入口是 `config/experiment/HighSpeedTrain_TripNet_volumeAll.py`。它使用 `dataset_option="tripnet_volume"`，只读 per-case FP32 triplane cache 作为几何输入，不使用 normal/area；训练前需先构建：
+
+```text
+cache/<TrainType>/triplane_32x128x128_fp32/<case_name>.npz
+```
+
 ### task
 
 ```python
@@ -249,6 +271,8 @@ U_raw = U_norm * abs(u_ref) + [u_ref, 0, 0]
     "p": {"type": "physical", "dataset": "HighSpeedTrain"},
     "U": {"type": "physical", "dataset": "HighSpeedTrain"},
     "k": {"type": "physical", "dataset": "HighSpeedTrain"},
+    "omega": {"type": "physical", "dataset": "HighSpeedTrain"},
+    "nut": {"type": "physical", "dataset": "HighSpeedTrain"},
 }
 ```
 
@@ -258,11 +282,13 @@ U_raw = U_norm * abs(u_ref) + [u_ref, 0, 0]
 free_stream = [cond0 * 100, cond1 * 20, 0]
 speed = norm(free_stream)
 p_raw = p_norm * (0.5 * speed ** 2)
-U_raw = U_norm * speed + free_stream
-k_raw = k_norm * speed ** 2
+U_raw = U_norm * speed
+k_raw = k_norm * (0.01 * speed ** 2)
+omega_raw = omega_norm * (100.0 * speed)
+nut_raw = nut_norm * (0.01 * speed)
 ```
 
-`omega` 和 `nut` 在当前 high-speed physical 归一化中不做缩放，因此反变换也是原值。
+对应 dataset 归一化为上述公式的反向变换；`p` 默认不做 clip，如需裁剪可显式设置 `clamp_cp`。
 
 如果 dataset 使用 `normalization="none"`，可以省略该字段。
 

@@ -14,6 +14,7 @@ from dataset.cache.drivaernet import (
     DEFAULT_VOLUME_CACHE_POINTS,
     DRIVAERNET_ROOT,
     DrivAerNetPlusPlusCacheBuilder,
+    DrivAerNetPlusPlusWallDistanceCacheBuilder,
     compute_cache_statistics,
 )
 from dataset.surface.base import EmptySurfaceDataset
@@ -74,6 +75,7 @@ class DrivAerNetPlusPlusDataset(Dataset):
         velocity_std: Iterable[float] = VELOCITY_STD,
         pressure_scale: float = DEFAULT_PRESSURE_SCALE,
         velocity_scale: float = DEFAULT_VELOCITY_SCALE,
+        wall_distance_target_transform: str | None = None,
         center_x: bool = True,
         cond: Iterable[float] = (0.3, 1.0),
         route: int = 0,
@@ -117,6 +119,7 @@ class DrivAerNetPlusPlusDataset(Dataset):
             self.num_surface_points,
             self.num_surface_query_points,
             self.num_query_points,
+            wall_distance_target_transform,
         )
 
         case_names = matched_vtk_names(self.pressure_dir, self.cfd_dir)
@@ -152,6 +155,7 @@ class DrivAerNetPlusPlusDataset(Dataset):
                 num_query_points=num_query_points,
                 volume_target_list=self.volume_target_list,
                 volume_cache_points=volume_cache_points,
+                wall_distance_target_transform=wall_distance_target_transform,
                 **common_kwargs,
             )
         else:
@@ -218,6 +222,7 @@ __all__ = [
     "VELOCITY_MEAN",
     "VELOCITY_STD",
     "DrivAerNetPlusPlusCacheBuilder",
+    "DrivAerNetPlusPlusWallDistanceCacheBuilder",
     "DrivAerNetPlusPlusDataset",
     "DrivAerNetPlusPlusFieldDataset",
     "Dataset",

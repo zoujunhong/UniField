@@ -3,7 +3,8 @@ from __future__ import annotations
 from typing import Any
 
 import torch
-import torch.nn.functional as F
+
+from loss import supervised_field_loss, volume_relation_loss
 
 
 FIELD_DIMS = {
@@ -12,6 +13,9 @@ FIELD_DIMS = {
     "k": 1,
     "omega": 1,
     "nut": 1,
+    "surface_distance": 1,
+    "wall_distance": 1,
+    "sdf": 1,
     "Cd": 1,
     "Cl": 1,
     "Cs": 1,
@@ -20,6 +24,14 @@ FIELD_DIMS = {
 
 
 def split_surface_input(surface_input: torch.Tensor, surface_input_list: list[str]):
+    if surface_input_list == ["triplane"]:
+        if surface_input.dim() != 5:
+            raise ValueError("TripNet surface_input must have shape (B, 3, C, H, W).")
+        return surface_input, None, None
+    if surface_input_list == ["gaussian3d"]:
+        if surface_input.dim() != 3:
+            raise ValueError("Gaussian3D surface_input must have shape (B, M, C).")
+        return surface_input, None, None
     fields = ["xyz", *[field for field in surface_input_list if field != "xyz"]]
     offset = 0
     surface_pos = None
@@ -32,7 +44,7 @@ def split_surface_input(surface_input: torch.Tensor, surface_input_list: list[st
         elif field in {"normal", "normals"}:
             surface_normals = surface_input[..., offset : offset + 3]
             offset += 3
-        elif field in {"area", "log_area", "p", "k", "omega", "nut"}:
+        elif field in {"area", "log_area", "p", "k", "omega", "nut", "surface_distance", "wall_distance", "sdf"}:
             value = surface_input[..., offset : offset + 1]
             if field == "area":
                 surface_area = value
@@ -72,14 +84,25 @@ def build_query(surface_query: torch.Tensor, volume_query: torch.Tensor, add_typ
     )
 
 
+def _move_meta_to_device(value, device: int | torch.device):
+    if torch.is_tensor(value):
+        return value.float().to(device, non_blocking=True)
+    if isinstance(value, dict):
+        return {key: _move_meta_to_device(item, device) for key, item in value.items()}
+    return value
+
+
 def move_batch_to_device(batch, device: int | torch.device, surface_input_list: list[str]) -> dict[str, torch.Tensor | None]:
+    geometry_meta = None
     if len(batch) == 7:
         surface_input, surface_query, surface_target, volume_query, volume_target, cond, routes = batch
         coefficient_target = torch.zeros((surface_input.shape[0], 0), dtype=surface_input.dtype)
     elif len(batch) == 8:
         surface_input, surface_query, surface_target, volume_query, volume_target, cond, routes, coefficient_target = batch
+    elif len(batch) == 9:
+        surface_input, surface_query, surface_target, volume_query, volume_target, cond, routes, coefficient_target, geometry_meta = batch
     else:
-        raise ValueError(f"Expected dataset batch with 7 or 8 items, got {len(batch)}.")
+        raise ValueError(f"Expected dataset batch with 7, 8, or 9 items, got {len(batch)}.")
     surface_input = surface_input.float().to(device, non_blocking=True)
     surface_pos, normals, area = split_surface_input(surface_input, surface_input_list)
     return {
@@ -94,6 +117,7 @@ def move_batch_to_device(batch, device: int | torch.device, surface_input_list: 
         "coefficient_target": coefficient_target.float().to(device, non_blocking=True),
         "cond": cond.float().to(device, non_blocking=True),
         "routes": routes.long().to(device, non_blocking=True),
+        "geometry_meta": None if geometry_meta is None else _move_meta_to_device(geometry_meta, device),
     }
 
 
@@ -131,25 +155,39 @@ def compute_query_loss(
     for item in task_config.get("losses", []):
         domain = item["domain"]
         field = item["field"]
-        pred_slice = slice(*item["pred_slice"])
         weight = float(item.get("weight", 1.0))
         if domain == "surface":
             if surface_count == 0:
                 continue
+            pred_slice = slice(*item["pred_slice"])
             target_slice = surface_slices[field]
-            value = F.l1_loss(surface_pred[..., pred_slice], surface_target[..., target_slice])
+            value = supervised_field_loss(surface_pred[..., pred_slice], surface_target[..., target_slice], item)
         elif domain == "volume":
             if volume_pred.shape[1] == 0:
                 continue
+            pred_slice = slice(*item["pred_slice"])
             target_slice = volume_slices[field]
-            value = F.l1_loss(volume_pred[..., pred_slice], volume_target[..., target_slice])
+            value = supervised_field_loss(volume_pred[..., pred_slice], volume_target[..., target_slice], item)
+        elif domain == "volume_relation":
+            if volume_pred.shape[1] == 0:
+                continue
+            value = volume_relation_loss(
+                field,
+                volume_pred,
+                volume_target,
+                volume_slices,
+                item,
+                batch=batch,
+                task_config=task_config,
+            )
         elif domain == "coefficients":
             if coeff_pred is None:
                 raise ValueError("Model output does not include coefficient predictions.")
             if coefficient_target.shape[-1] == 0:
                 continue
+            pred_slice = slice(*item["pred_slice"])
             target_slice = coefficient_slices[field]
-            value = F.l1_loss(coeff_pred[..., pred_slice], coefficient_target[..., target_slice])
+            value = supervised_field_loss(coeff_pred[..., pred_slice], coefficient_target[..., target_slice], item)
         else:
             raise ValueError(f"Unsupported loss domain: {domain}")
         losses[f"{domain}_{field}"] = value

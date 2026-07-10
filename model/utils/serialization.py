@@ -1,5 +1,54 @@
+from collections.abc import Callable
+
 import torch
 import torch.nn.functional as F
+
+
+SortFunction = Callable[..., tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]]
+SORT_METHODS: dict[str, SortFunction] = {}
+
+
+def register_sort_method(name: str, fn: SortFunction | None = None):
+    """Register a point serialization method used by UniField encoders."""
+    key = str(name).lower()
+
+    def decorator(func: SortFunction) -> SortFunction:
+        SORT_METHODS[key] = func
+        return func
+
+    if fn is not None:
+        return decorator(fn)
+    return decorator
+
+
+def get_sort_method(name: str) -> SortFunction:
+    key = str(name).lower()
+    if key not in SORT_METHODS:
+        raise ValueError(f"Unsupported point order: {name}. Available: {sorted(SORT_METHODS)}")
+    return SORT_METHODS[key]
+
+
+def sort_points(
+    points: torch.Tensor,
+    method: str,
+    *,
+    inflow_dir: torch.Tensor | None = None,
+    bits: int = 20,
+    num_bins: int = 32,
+    sort_bits: int = 12,
+    snake: bool = True,
+    ground_aligned: bool = True,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
+    """Sort points with a registered serialization method."""
+    return get_sort_method(method)(
+        points,
+        inflow_dir=inflow_dir,
+        bits=bits,
+        num_bins=num_bins,
+        sort_bits=sort_bits,
+        snake=snake,
+        ground_aligned=ground_aligned,
+    )
 
 
 # --------------------------
@@ -438,6 +487,93 @@ def flow_aligned_morton3d_sort(
             index=idx.unsqueeze(-1).expand(-1, -1, points.shape[-1]),
         )
     return sorted_points, idx, codes
+
+
+@register_sort_method("random")
+@register_sort_method("random_global")
+def random_sort(
+    points: torch.Tensor,
+    *,
+    inflow_dir: torch.Tensor | None = None,
+    bits: int = 20,
+    num_bins: int = 32,
+    sort_bits: int = 12,
+    snake: bool = True,
+    ground_aligned: bool = True,
+):
+    """Randomly permute points independently for each batch item."""
+    del inflow_dir, bits, num_bins, sort_bits, snake, ground_aligned
+    if points.dim() == 2:
+        idx = torch.randperm(points.shape[0], device=points.device)
+        sorted_points = points.gather(0, idx.unsqueeze(-1).expand(-1, points.shape[-1]))
+    elif points.dim() == 3:
+        scores = torch.rand(points.shape[:2], device=points.device)
+        idx = torch.argsort(scores, dim=-1)
+        sorted_points = points.gather(1, idx.unsqueeze(-1).expand(-1, -1, points.shape[-1]))
+    else:
+        raise ValueError("points must be (N, D) or (B, N, D).")
+    return sorted_points, idx, None
+
+
+@register_sort_method("morton")
+def _registered_morton3d_sort(
+    points: torch.Tensor,
+    *,
+    inflow_dir: torch.Tensor | None = None,
+    bits: int = 20,
+    num_bins: int = 32,
+    sort_bits: int = 12,
+    snake: bool = True,
+    ground_aligned: bool = True,
+):
+    del inflow_dir, num_bins, sort_bits, snake, ground_aligned
+    return morton3d_sort(points, bits=bits)
+
+
+@register_sort_method("flow_morton")
+@register_sort_method("flow_aligned_morton")
+def _registered_flow_aligned_morton3d_sort(
+    points: torch.Tensor,
+    *,
+    inflow_dir: torch.Tensor | None = None,
+    bits: int = 20,
+    num_bins: int = 32,
+    sort_bits: int = 12,
+    snake: bool = True,
+    ground_aligned: bool = True,
+):
+    del num_bins, sort_bits, snake
+    if inflow_dir is None:
+        raise ValueError("flow_morton sorting requires inflow_dir.")
+    return flow_aligned_morton3d_sort(
+        points,
+        inflow_dir,
+        bits=bits,
+        ground_aligned=ground_aligned,
+    )
+
+
+@register_sort_method("flow_sfc")
+def _registered_flow_aware_sfc(
+    points: torch.Tensor,
+    *,
+    inflow_dir: torch.Tensor | None = None,
+    bits: int = 20,
+    num_bins: int = 32,
+    sort_bits: int = 12,
+    snake: bool = True,
+    ground_aligned: bool = True,
+):
+    del bits, ground_aligned
+    if inflow_dir is None:
+        raise ValueError("flow_sfc sorting requires inflow_dir.")
+    return flow_aware_sfc(
+        points,
+        inflow_dir,
+        num_bins=num_bins,
+        bits=sort_bits,
+        snake=snake,
+    )
 
 
 # 预留 Hilbert 接口，将来你可以把 morton3d_codes 换掉，保持签名不变

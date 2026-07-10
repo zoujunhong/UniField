@@ -1,0 +1,27 @@
+CONFIG = {
+    "name": ["CRH450Gaussian3D", "MaglevGaussian3D"],
+    "drop_empty": True,
+    "common_kwargs": {
+        "use_surface": True,
+        "use_volume": True,
+        "num_surface_points": 0,
+        "num_surface_query_points": 0,
+        "num_query_points": 8192,
+        "surface_input_list": ["gaussian3d"],
+        "surface_target_list": [],
+        "volume_target_list": ["U", "p", "k", "omega", "nut"],
+        "coefficient_target_list": [],
+        "normalization": "physical",
+        "cache_dtype": "fp32",
+        "num_gaussians": 4096,
+        "gaussian_channels": 32,
+        "knn": 32,
+        "allow_empty": True,
+        "repeat": 10,
+        "route": 0,
+    },
+    "kwargs": {
+        "CRH450Gaussian3D": {"route": 0},
+        "MaglevGaussian3D": {"route": 0},
+    },
+}

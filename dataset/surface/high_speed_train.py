@@ -4,7 +4,7 @@ import os
 
 import numpy as np
 
-from dataset.cache.high_speed_train import DEFAULT_SURFACE_CACHE_POINTS, cache_path, normalized_train_type
+from dataset.cache.high_speed_train import DEFAULT_CACHE_DTYPE, DEFAULT_SURFACE_CACHE_POINTS, cache_path, normalized_cache_dtype, normalized_train_type
 from dataset.utils.load import ensure_xyz_prefix, parse_high_speed_case_cond
 from dataset.utils.normalization import normalize_high_speed_field
 from dataset.utils.sampling import sample_rows_np
@@ -21,8 +21,10 @@ class HighSpeedTrainSurfaceDataset:
         surface_target_list: list[str] | tuple[str, ...] | None = ("p",),
         surface_sampling: str = "random",
         surface_cache_points: int = DEFAULT_SURFACE_CACHE_POINTS,
+        cache_dtype: str = DEFAULT_CACHE_DTYPE,
         normalization: str = "physical",
-        clamp_cp: tuple[float, float] | None = (-5.0, 1.05),
+        standard_stats=None,
+        clamp_cp: tuple[float, float] | None = None,
         mmap: bool = False,
     ) -> None:
         if surface_sampling not in {"random", "uniform", "mixed"}:
@@ -35,7 +37,9 @@ class HighSpeedTrainSurfaceDataset:
         self.surface_target_list = list(surface_target_list or [])
         self.surface_sampling = surface_sampling
         self.surface_cache_points = int(surface_cache_points)
+        self.cache_dtype = normalized_cache_dtype(cache_dtype)
         self.normalization = normalization
+        self.standard_stats = standard_stats
         self.clamp_cp = clamp_cp
         self.mmap_mode = "r" if mmap else None
 
@@ -46,7 +50,7 @@ class HighSpeedTrainSurfaceDataset:
 
     def _load_rows(self, case_name: str, rng: np.random.Generator) -> np.ndarray:
         mode = self._choose_surface_mode(rng)
-        path = cache_path(self.cache_root, self.train_type, f"surface_{mode}", self.surface_cache_points, case_name)
+        path = cache_path(self.cache_root, self.train_type, f"surface_{mode}", self.surface_cache_points, case_name, self.cache_dtype)
         if not os.path.exists(path):
             raise FileNotFoundError(
                 f"Missing HighSpeedTrain surface cache: {path}. "
@@ -60,15 +64,15 @@ class HighSpeedTrainSurfaceDataset:
         if name == "xyz":
             return rows[:, :3]
         if name == "p":
-            return normalize_high_speed_field("p", rows[:, 3:4], self.normalization, speed, self.clamp_cp)
+            return normalize_high_speed_field("p", rows[:, 3:4], self.normalization, speed, self.clamp_cp, self.standard_stats)
         if name == "U":
-            return normalize_high_speed_field("U", rows[:, 4:7], self.normalization, speed, self.clamp_cp)
+            return normalize_high_speed_field("U", rows[:, 4:7], self.normalization, speed, self.clamp_cp, self.standard_stats)
         if name == "k":
-            return normalize_high_speed_field("k", rows[:, 7:8], self.normalization, speed, self.clamp_cp)
+            return normalize_high_speed_field("k", rows[:, 7:8], self.normalization, speed, self.clamp_cp, self.standard_stats)
         if name == "omega":
-            return normalize_high_speed_field("omega", rows[:, 8:9], self.normalization, speed, self.clamp_cp)
+            return normalize_high_speed_field("omega", rows[:, 8:9], self.normalization, speed, self.clamp_cp, self.standard_stats)
         if name == "nut":
-            return normalize_high_speed_field("nut", rows[:, 9:10], self.normalization, speed, self.clamp_cp)
+            return normalize_high_speed_field("nut", rows[:, 9:10], self.normalization, speed, self.clamp_cp, self.standard_stats)
         if name in {"normal", "normals"}:
             if rows.shape[1] >= 13:
                 return rows[:, 10:13]

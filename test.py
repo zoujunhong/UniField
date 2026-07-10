@@ -115,6 +115,7 @@ def evaluate(config: dict) -> None:
                     routes=batch["routes"],
                     normals=batch["normals"],
                     area=batch["area"],
+                    geometry_meta=batch.get("geometry_meta"),
                     query_chunk_size=int(test_config.get("query_chunk_size", 50000)),
                 )
             except NotImplementedError:
@@ -125,6 +126,7 @@ def evaluate(config: dict) -> None:
                     routes=batch["routes"],
                     normals=batch["normals"],
                     area=batch["area"],
+                    geometry_meta=batch.get("geometry_meta"),
                 )
         else:
             pred = model(
@@ -134,6 +136,7 @@ def evaluate(config: dict) -> None:
                 routes=batch["routes"],
                 normals=batch["normals"],
                 area=batch["area"],
+                geometry_meta=batch.get("geometry_meta"),
             )
 
         surface_count = int(batch["surface_query"].shape[1])

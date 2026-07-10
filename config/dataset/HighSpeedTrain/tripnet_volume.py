@@ -1,0 +1,26 @@
+CONFIG = {
+    "name": ["CRH450TripNet", "MaglevTripNet"],
+    "drop_empty": True,
+    "common_kwargs": {
+        "use_surface": True,
+        "use_volume": True,
+        "num_surface_points": 0,
+        "num_surface_query_points": 0,
+        "num_query_points": 8192,
+        "surface_input_list": ["triplane"],
+        "surface_target_list": [],
+        "volume_target_list": ["U", "p", "k", "omega", "nut"],
+        "coefficient_target_list": [],
+        "normalization": "physical",
+        "cache_dtype": "fp32",
+        "triplane_channels": 32,
+        "triplane_resolution": 128,
+        "allow_empty": True,
+        "repeat": 10,
+        "route": 0,
+    },
+    "kwargs": {
+        "CRH450TripNet": {"route": 0},
+        "MaglevTripNet": {"route": 0},
+    },
+}

@@ -86,17 +86,29 @@ def _legacy_route_tensor_name(target_name: str) -> tuple[str, str] | None:
     return legacy_prefix + mapping[suffix], suffix
 
 
+def _partial_leading_dim_load(dst: torch.Tensor, src: torch.Tensor) -> torch.Tensor | None:
+    if src.ndim != dst.ndim or src.ndim == 0:
+        return None
+    if src.shape[0] > dst.shape[0] or tuple(src.shape[1:]) != tuple(dst.shape[1:]):
+        return None
+    merged = dst.clone()
+    merged[: src.shape[0]] = src
+    return merged
+
+
 def load_route_compatible_state_dict(
     module: nn.Module,
     checkpoint: Mapping[str, Any],
     route_map: Optional[Sequence[int]] = None,
     strict: bool = False,
+    partial_load: bool = False,
 ) -> dict[str, list[str]]:
     source, alias_to_source = _add_legacy_query_aliases(clean_checkpoint_state_dict(checkpoint))
     target = module.state_dict()
     loaded: list[str] = []
     legacy_loaded: list[str] = []
     route_loaded: list[str] = []
+    partial_loaded: list[str] = []
     skipped: list[str] = []
     loaded_names: set[str] = set()
 
@@ -117,6 +129,13 @@ def load_route_compatible_state_dict(
                 loaded.append(name)
             loaded_names.add(name)
         else:
+            if partial_load:
+                merged = _partial_leading_dim_load(dst, src)
+                if merged is not None:
+                    target[name] = merged
+                    partial_loaded.append(f"{name}: leading slice {tuple(src.shape)} -> {tuple(dst.shape)}")
+                    loaded_names.add(name)
+                    continue
             skipped.append(f"{name}: shape mismatch {tuple(src.shape)} -> {tuple(dst.shape)}")
 
     for name, dst in list(target.items()):
@@ -170,7 +189,13 @@ def load_route_compatible_state_dict(
     if strict and skipped:
         raise RuntimeError("Route-compatible load skipped weights:\n" + "\n".join(skipped))
     module.load_state_dict(target, strict=True)
-    return {"loaded": loaded, "legacy_loaded": legacy_loaded, "route_loaded": route_loaded, "skipped": skipped}
+    return {
+        "loaded": loaded,
+        "legacy_loaded": legacy_loaded,
+        "route_loaded": route_loaded,
+        "partial_loaded": partial_loaded,
+        "skipped": skipped,
+    }
 
 
 __all__ = ["clean_checkpoint_state_dict", "load_route_compatible_state_dict"]

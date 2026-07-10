@@ -25,24 +25,43 @@ def clean_state_dict(state_dict: dict[str, torch.Tensor]) -> dict[str, torch.Ten
     return cleaned
 
 
+def _partial_leading_dim_load(dst: torch.Tensor, src: torch.Tensor) -> torch.Tensor | None:
+    if src.ndim != dst.ndim or src.ndim == 0:
+        return None
+    if src.shape[0] > dst.shape[0] or tuple(src.shape[1:]) != tuple(dst.shape[1:]):
+        return None
+    merged = dst.clone()
+    merged[: src.shape[0]] = src.to(device=dst.device, dtype=dst.dtype)
+    return merged
+
+
 def load_model_weights(
     model: torch.nn.Module,
     checkpoint_path: str | Path,
     route_map: Sequence[int] | None = None,
     strict: bool = False,
+    partial_load: bool = False,
 ) -> torch.nn.Module:
     checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
     target = unwrap_model(model)
     if hasattr(target, "load_route_compatible_state_dict"):
-        report = target.load_route_compatible_state_dict(checkpoint, route_map=route_map, strict=strict)
+        report = target.load_route_compatible_state_dict(
+            checkpoint,
+            route_map=route_map,
+            strict=strict,
+            partial_load=partial_load,
+        )
         print(
             "Route-compatible load: "
             f"{len(report['loaded'])} exact, "
             f"{len(report.get('legacy_loaded', []))} legacy-remapped, "
             f"{len(report['route_loaded'])} route-adapted, "
+            f"{len(report.get('partial_loaded', []))} partial, "
             f"{len(report['skipped'])} skipped",
             flush=True,
         )
+        for item in report.get("partial_loaded", []):
+            print(f"Partially loaded weight: {item}", flush=True)
         for item in report["skipped"]:
             print(f"Skipping weight: {item}", flush=True)
         return model
@@ -58,6 +77,16 @@ def load_model_weights(
                 continue
             raise KeyError(f"Checkpoint key not found in model: {name}")
         if model_state[name].shape != param.shape:
+            if partial_load:
+                merged = _partial_leading_dim_load(model_state[name], param)
+                if merged is not None:
+                    filtered[name] = merged
+                    print(
+                        f"Partially loaded weight: {name}: leading slice {tuple(param.shape)} -> "
+                        f"{tuple(model_state[name].shape)}",
+                        flush=True,
+                    )
+                    continue
             if not strict:
                 print(f"Skipping weight: {name} due to shape mismatch ({param.shape} vs {model_state[name].shape})", flush=True)
                 continue
@@ -70,6 +99,8 @@ def load_model_weights(
 
 def resolve_eval_checkpoint(config: dict, phase: str) -> str:
     phase_config = config.get(phase, {})
+    if phase_config.get("checkpoint") is None:
+        return ""
     checkpoint = str(phase_config.get("checkpoint", ""))
     if checkpoint:
         return checkpoint

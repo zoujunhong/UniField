@@ -9,12 +9,15 @@ import torch
 from torch.utils.data import Dataset
 
 from dataset.cache.high_speed_train import (
+    DEFAULT_CACHE_DTYPE,
     DEFAULT_SURFACE_CACHE_POINTS,
     DEFAULT_VOLUME_CACHE_POINTS,
     HIGH_SPEED_TRAIN_GEOMETRY_COUNTS,
     HIGH_SPEED_TRAIN_ROOT,
     cache_path,
+    cache_numpy_dtype,
     high_speed_case_sort_key,
+    normalized_cache_dtype,
     normalized_train_type,
     parse_high_speed_geo_id,
     valid_npy_cache,
@@ -34,6 +37,9 @@ HIGH_SPEED_FIELD_MIN_COLS = {
     "k": 8,
     "omega": 9,
     "nut": 10,
+    "surface_distance": 11,
+    "wall_distance": 11,
+    "sdf": 11,
     "normal": 13,
     "normals": 13,
     "area": 14,
@@ -88,6 +94,15 @@ def _surface_cache_kinds(surface_sampling: str) -> tuple[str, ...]:
     return (f"surface_{surface_sampling}",)
 
 
+def _append_feature_column(query: np.ndarray, values: np.ndarray) -> np.ndarray:
+    values = np.asarray(values, dtype=np.float32).reshape(-1, 1)
+    if query.shape[0] != values.shape[0]:
+        raise ValueError(f"query rows ({query.shape[0]}) and feature rows ({values.shape[0]}) do not match.")
+    if query.shape[1] != 3:
+        raise ValueError(f"SDF query feature expects xyz query with 3 columns, got {query.shape[1]}.")
+    return np.concatenate([query.astype(np.float32, copy=False), values], axis=1).astype(np.float32, copy=False)
+
+
 def _split_high_speed_names_by_geometry(
     names: list[str],
     train_type: str,
@@ -130,21 +145,26 @@ def _complete_high_speed_cache_case(
     surface_sampling: str,
     surface_cache_points: int,
     volume_cache_points: int,
+    cache_dtype: str,
     surface_input_list: list[str],
     surface_target_list: list[str],
     volume_target_list: list[str],
     coefficient_target_list: list[str],
+    require_volume_surface_distance: bool = False,
 ) -> bool:
     if use_surface:
         min_cols = _required_high_speed_cols([*surface_input_list, *surface_target_list])
         for kind in _surface_cache_kinds(surface_sampling):
-            path = cache_path(cache_root, train_type, kind, surface_cache_points, case_name)
-            if not valid_npy_cache(path, min_cols=min_cols):
+            path = cache_path(cache_root, train_type, kind, surface_cache_points, case_name, cache_dtype)
+            if not valid_npy_cache(path, min_cols=min_cols, dtype=cache_numpy_dtype(cache_dtype)):
                 return False
     if use_volume:
-        min_cols = _required_high_speed_cols(["xyz", *volume_target_list])
-        path = cache_path(cache_root, train_type, "volume_random", volume_cache_points, case_name)
-        if not valid_npy_cache(path, min_cols=min_cols):
+        volume_fields = ["xyz", *volume_target_list]
+        if require_volume_surface_distance:
+            volume_fields.append("surface_distance")
+        min_cols = _required_high_speed_cols(volume_fields)
+        path = cache_path(cache_root, train_type, "volume_random", volume_cache_points, case_name, cache_dtype)
+        if not valid_npy_cache(path, min_cols=min_cols, dtype=cache_numpy_dtype(cache_dtype)):
             return False
     if coefficient_target_list:
         type_dir = high_speed_type_dir(root_dir, train_type)
@@ -171,6 +191,7 @@ class HighSpeedTrainDatasetBase(Dataset):
         surface_sampling: str = "random",
         surface_cache_points: int = DEFAULT_SURFACE_CACHE_POINTS,
         volume_cache_points: int = DEFAULT_VOLUME_CACHE_POINTS,
+        cache_dtype: str = DEFAULT_CACHE_DTYPE,
         ids_file: str | None = None,
         split: str = "all",
         val_ratio: float = 0.1,
@@ -179,17 +200,22 @@ class HighSpeedTrainDatasetBase(Dataset):
         allow_empty: bool = False,
         repeat: int = 1,
         normalization: str = "physical",
+        standard_stats=None,
         center_x: bool = True,
         route: int = 0,
         mmap: bool = False,
         deterministic: bool = False,
         seed: int = 0,
-        clamp_cp: tuple[float, float] | None = (-5.0, 1.05),
+        clamp_cp: tuple[float, float] | None = None,
+        query_sdf_clip: float | None = None,
+        surface_distance_target_transform: str | None = None,
     ) -> None:
         if not use_surface and not use_volume:
             raise ValueError("At least one of use_surface/use_volume must be True.")
         if split not in {"all", "train", "val", "test"}:
             raise ValueError("split must be 'all', 'train', 'val', or 'test'.")
+        if query_sdf_clip is not None and float(query_sdf_clip) <= 0.0:
+            raise ValueError("query_sdf_clip must be positive when enabled.")
 
         self.root_dir = root_dir
         self.train_type = normalized_train_type(train_type)
@@ -203,6 +229,9 @@ class HighSpeedTrainDatasetBase(Dataset):
         self.allow_empty = bool(allow_empty)
         self.deterministic = bool(deterministic)
         self.seed = int(seed)
+        self.query_sdf_clip = None if query_sdf_clip is None else float(query_sdf_clip)
+        self.surface_distance_target_transform = surface_distance_target_transform
+        self.surface_cache_points = int(surface_cache_points)
         self.surface_input_list = ensure_xyz_prefix(surface_input_list, ("xyz", "normal", "area"))
         self.surface_target_list = list(surface_target_list or [])
         self.volume_target_list = list(volume_target_list or [])
@@ -211,6 +240,7 @@ class HighSpeedTrainDatasetBase(Dataset):
         self.num_surface_points = int(num_surface_points)
         self.num_surface_query_points = self.num_surface_points if num_surface_query_points is None else int(num_surface_query_points)
         self.num_query_points = int(num_query_points)
+        self.cache_dtype = normalized_cache_dtype(cache_dtype)
         self.interface_signature = (
             tuple(self.surface_input_list),
             tuple(self.surface_target_list),
@@ -219,6 +249,8 @@ class HighSpeedTrainDatasetBase(Dataset):
             self.num_surface_points,
             self.num_surface_query_points,
             self.num_query_points,
+            self.query_sdf_clip,
+            self.surface_distance_target_transform,
         )
 
         case_dirs = list_high_speed_cases(root_dir, self.train_type)
@@ -245,10 +277,12 @@ class HighSpeedTrainDatasetBase(Dataset):
                     surface_sampling,
                     int(surface_cache_points),
                     int(volume_cache_points),
+                    self.cache_dtype,
                     self.surface_input_list,
                     self.surface_target_list,
                     self.volume_target_list,
                     self.coefficient_target_list,
+                    self.query_sdf_clip is not None,
                 )
             ]
             skipped = split_case_count - len(names)
@@ -280,7 +314,9 @@ class HighSpeedTrainDatasetBase(Dataset):
                 surface_target_list=self.surface_target_list,
                 surface_sampling=surface_sampling,
                 surface_cache_points=surface_cache_points,
+                cache_dtype=self.cache_dtype,
                 normalization=normalization,
+                standard_stats=standard_stats,
                 clamp_cp=clamp_cp,
                 mmap=mmap,
             )
@@ -294,8 +330,13 @@ class HighSpeedTrainDatasetBase(Dataset):
                 num_query_points=num_query_points,
                 volume_target_list=self.volume_target_list,
                 volume_cache_points=volume_cache_points,
+                cache_dtype=self.cache_dtype,
                 normalization=normalization,
+                standard_stats=standard_stats,
                 clamp_cp=clamp_cp,
+                query_surface_distance=self.query_sdf_clip is not None,
+                query_surface_distance_clip=self.query_sdf_clip,
+                surface_distance_target_transform=self.surface_distance_target_transform,
                 mmap=mmap,
             )
         else:
@@ -310,6 +351,12 @@ class HighSpeedTrainDatasetBase(Dataset):
     def __len__(self) -> int:
         return len(self.case_names) * self.repeat
 
+    def _append_surface_query_sdf(self, surface_query: np.ndarray) -> np.ndarray:
+        if self.query_sdf_clip is None:
+            return surface_query
+        surface_sdf = np.zeros((surface_query.shape[0],), dtype=np.float32)
+        return _append_feature_column(surface_query, surface_sdf)
+
     def __getitem__(self, idx: int):
         case_name = self.case_names[idx % len(self.case_names)]
         rng = rng_for_index(self.seed, idx, self.deterministic)
@@ -319,6 +366,7 @@ class HighSpeedTrainDatasetBase(Dataset):
         volume_query, volume_target = self.volume.sample(case_name, rng)
         type_dir = high_speed_type_dir(self.root_dir, self.train_type)
         coefficient_target = read_high_speed_coefficients(type_dir / case_name, self.coefficient_target_list)
+        surface_query = self._append_surface_query_sdf(surface_query)
 
         if self.center_x and surface_input.shape[0] > 0:
             x_center = 0.5 * (surface_input[:, 0].max() + surface_input[:, 0].min())

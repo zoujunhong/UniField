@@ -13,8 +13,9 @@ CONFIG = {
         "coefficient_target_list": ["Cd", "Cl", "Cs", "Cm_overturn"],
         "surface_sampling": "random",
         "normalization": "physical",
+        "cache_dtype": "fp32",
         "allow_empty": True,
-        "repeat": 1,
+        "repeat": 10,
         "route": 0,
     },
     "kwargs": {

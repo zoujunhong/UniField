@@ -11,7 +11,7 @@ from timm.layers.drop import DropPath
 from model.utils.attention import FlowManifoldAttention
 from model.utils.checkpoint import load_route_compatible_state_dict
 from model.utils.ffn import FFN, RoutedAdaLN, apply_norm
-from model.utils.serialization import flow_aligned_morton3d_sort, flow_aware_sfc, morton3d_sort
+from model.utils.serialization import sort_points
 
 
 def _gather_tokens(x: torch.Tensor, idx: torch.Tensor) -> torch.Tensor:
@@ -48,10 +48,14 @@ class FlowManifoldBlock(nn.Module):
         num_routes: int = 1,
         use_flow_attention: bool = True,
         use_flow_ffn: bool = True,
+        separate_kv_norm: bool = True,
     ):
         super().__init__()
         self.norm1_q = RoutedAdaLN(dim, cond_dim, num_routes) if use_flow_ffn else nn.LayerNorm(dim)
-        self.norm1_kv = RoutedAdaLN(dim, cond_dim, num_routes) if use_flow_ffn else nn.LayerNorm(dim)
+        if separate_kv_norm:
+            self.norm1_kv = RoutedAdaLN(dim, cond_dim, num_routes) if use_flow_ffn else nn.LayerNorm(dim)
+        else:
+            self.norm1_kv = self.norm1_q
         self.attn = FlowManifoldAttention(
             dim=dim,
             num_heads=num_heads,
@@ -152,6 +156,7 @@ class FlowEncoderStage(nn.Module):
                     num_routes=num_routes,
                     use_flow_attention=use_flow_attention,
                     use_flow_ffn=use_flow_ffn,
+                    separate_kv_norm=False,
                 )
                 for i in range(depth)
             ]
@@ -180,25 +185,16 @@ class FlowEncoderStage(nn.Module):
     def _sort_state(self, state: SurfaceState, flow: torch.Tensor, method: str) -> SurfaceState:
         if method in {"none", None}:
             return state
-        if method == "flow_sfc":
-            _, idx, _ = flow_aware_sfc(
-                state.pos.float(),
-                flow.float(),
-                num_bins=self.sort_bins,
-                bits=self.sort_bits,
-                snake=True,
-            )
-        elif method == "flow_morton":
-            _, idx, _ = flow_aligned_morton3d_sort(
-                state.pos.float(),
-                flow.float(),
-                bits=20,
-                ground_aligned=True,
-            )
-        elif method == "morton":
-            _, idx, _ = morton3d_sort(state.pos.float(), bits=20)
-        else:
-            raise ValueError(f"Unsupported point order: {method}.")
+        _, idx, _ = sort_points(
+            state.pos.float(),
+            method,
+            inflow_dir=flow.float(),
+            bits=20,
+            num_bins=self.sort_bins,
+            sort_bits=self.sort_bits,
+            snake=True,
+            ground_aligned=True,
+        )
         return SurfaceState(
             x=_gather_tokens(state.x, idx),
             pos=_gather_tokens(state.pos, idx),
@@ -515,25 +511,16 @@ class UniFieldEncoder(nn.Module):
     def _input_sort_idx(self, pos: torch.Tensor, flow: torch.Tensor) -> Optional[torch.Tensor]:
         if self.input_order in {"none", None}:
             return None
-        if self.input_order == "flow_morton":
-            _, idx, _ = flow_aligned_morton3d_sort(
-                pos.float(),
-                flow.float(),
-                bits=20,
-                ground_aligned=True,
-            )
-        elif self.input_order == "morton":
-            _, idx, _ = morton3d_sort(pos.float(), bits=20)
-        elif self.input_order == "flow_sfc":
-            _, idx, _ = flow_aware_sfc(
-                pos.float(),
-                flow.float(),
-                num_bins=self.sort_bins,
-                bits=self.sort_bits,
-                snake=True,
-            )
-        else:
-            raise ValueError(f"Unsupported input_order: {self.input_order}.")
+        _, idx, _ = sort_points(
+            pos.float(),
+            self.input_order,
+            inflow_dir=flow.float(),
+            bits=20,
+            num_bins=self.sort_bins,
+            sort_bits=self.sort_bits,
+            snake=True,
+            ground_aligned=True,
+        )
         return idx
 
     def forward(
@@ -597,8 +584,15 @@ class UniFieldEncoder(nn.Module):
         checkpoint: Mapping[str, Any],
         route_map: Optional[Sequence[int]] = None,
         strict: bool = False,
+        partial_load: bool = False,
     ) -> dict[str, list[str]]:
-        return load_route_compatible_state_dict(self, checkpoint, route_map=route_map, strict=strict)
+        return load_route_compatible_state_dict(
+            self,
+            checkpoint,
+            route_map=route_map,
+            strict=strict,
+            partial_load=partial_load,
+        )
 
 
 __all__ = [

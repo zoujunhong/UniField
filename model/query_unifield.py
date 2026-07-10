@@ -43,19 +43,22 @@ class QueryUniField(nn.Module):
         normals: Optional[torch.Tensor] = None,
         area: Optional[torch.Tensor] = None,
         flow_vec: Optional[torch.Tensor] = None,
+        geometry_meta: Optional[Mapping[str, torch.Tensor]] = None,
     ) -> tuple[dict[str, torch.Tensor], Optional[torch.Tensor], torch.Tensor, torch.Tensor]:
         cond_t = self.encoder._prepare_cond(surface_pos, cond)
         routes_t = self.encoder._prepare_routes(surface_pos, routes)
         flow = self.encoder._prepare_flow(surface_pos, cond_t, flow_vec)
-        memory = self.encoder(
-            surface_pos,
-            cond=cond_t,
-            normals=normals,
-            area=area,
-            flow_vec=flow,
-            routes=routes_t,
-            return_pyramid=False,
-        )
+        encoder_kwargs = {
+            "cond": cond_t,
+            "normals": normals,
+            "area": area,
+            "flow_vec": flow,
+            "routes": routes_t,
+            "return_pyramid": False,
+        }
+        if geometry_meta is not None:
+            encoder_kwargs["geometry_meta"] = geometry_meta
+        memory = self.encoder(surface_pos, **encoder_kwargs)
         return memory, cond_t, routes_t, flow
 
     def forward(
@@ -67,6 +70,7 @@ class QueryUniField(nn.Module):
         normals: Optional[torch.Tensor] = None,
         area: Optional[torch.Tensor] = None,
         flow_vec: Optional[torch.Tensor] = None,
+        geometry_meta: Optional[Mapping[str, torch.Tensor]] = None,
     ) -> torch.Tensor | dict[str, torch.Tensor]:
         memory, cond_t, routes_t, flow = self.encode_surface(
             surface_pos,
@@ -75,6 +79,7 @@ class QueryUniField(nn.Module):
             normals=normals,
             area=area,
             flow_vec=flow_vec,
+            geometry_meta=geometry_meta,
         )
         query_pred = self.decoder(query_pos, memory, cond_t, routes_t, flow)
         return self._pack_output(query_pred, memory)
@@ -89,6 +94,7 @@ class QueryUniField(nn.Module):
         normals: Optional[torch.Tensor] = None,
         area: Optional[torch.Tensor] = None,
         flow_vec: Optional[torch.Tensor] = None,
+        geometry_meta: Optional[Mapping[str, torch.Tensor]] = None,
         query_chunk_size: Optional[int] = None,
     ) -> torch.Tensor | dict[str, torch.Tensor]:
         if not getattr(self.decoder, "supports_chunked_forward", False):
@@ -104,8 +110,13 @@ class QueryUniField(nn.Module):
             normals=normals,
             area=area,
             flow_vec=flow_vec,
+            geometry_meta=geometry_meta,
         )
         prepared = self.decoder.prepare_memory(memory, cond_t, routes_t, flow)
+        if getattr(self.decoder, "requires_full_query_forward", False):
+            query_pred = self.decoder.decode_with_memory(query_pos, prepared, cond_t, routes_t, flow)
+            return self._pack_output(query_pred, memory)
+
         outputs = []
         for start in range(0, query_pos.shape[1], query_chunk_size):
             query_chunk = query_pos[:, start : start + query_chunk_size]
@@ -120,8 +131,15 @@ class QueryUniField(nn.Module):
         checkpoint: Mapping[str, Any],
         route_map: Optional[Sequence[int]] = None,
         strict: bool = False,
+        partial_load: bool = False,
     ) -> dict[str, list[str]]:
-        return load_route_compatible_state_dict(self, checkpoint, route_map=route_map, strict=strict)
+        return load_route_compatible_state_dict(
+            self,
+            checkpoint,
+            route_map=route_map,
+            strict=strict,
+            partial_load=partial_load,
+        )
 
 
 class CoefficientHead(nn.Module):

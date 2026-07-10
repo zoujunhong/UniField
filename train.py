@@ -58,6 +58,7 @@ def train_one_epoch(model, loader, optimizer, scaler, lr_schedule, epoch: int, d
                 routes=batch["routes"],
                 normals=batch["normals"],
                 area=batch["area"],
+                geometry_meta=batch.get("geometry_meta"),
             )
             loss, losses = compute_query_loss(pred, batch, task_config)
 
@@ -129,7 +130,12 @@ def main_worker(local_rank: int, config: dict) -> None:
         print(f"模型参数量：{param_count / 1e6:.2f}M", flush=True)
 
     if train_config.get("checkpoint"):
-        load_model_weights(model, train_config["checkpoint"], route_map=train_config.get("route_map"))
+        load_model_weights(
+            model,
+            train_config["checkpoint"],
+            route_map=train_config.get("route_map"),
+            partial_load=bool(train_config.get("partial_load", False)),
+        )
         if is_main_process():
             print("===== checkpoint loaded =====", flush=True)
     if int(train_config.get("resume_epoch", 0)) > 0:
@@ -142,6 +148,7 @@ def main_worker(local_rank: int, config: dict) -> None:
     if dist.is_available() and dist.is_initialized():
         model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[device_index])
     if bool(runtime_config.get("compile", False)):
+        print("Compiling model with torch.compile()...")
         model = torch.compile(model)
 
     optimizer_config = {
@@ -193,6 +200,62 @@ def _resolve_model_size_path(config: dict) -> str:
     return str(resolve_path(f"config/model/{model_name}/{model_size}.py", config.get("_config_dir")))
 
 
+def _task_items(task_config: dict) -> list[dict]:
+    items = []
+    for key in ("losses", "eval_fields"):
+        values = task_config.get(key, [])
+        if values:
+            items.extend(values)
+    return items
+
+
+def _max_pred_slice_end(items: list[dict], domains: set[str]) -> int:
+    ends = []
+    for item in items:
+        if item.get("domain") in domains and "pred_slice" in item:
+            ends.append(int(item["pred_slice"][1]))
+    return max(ends) if ends else 0
+
+
+def _check_task_model_compatibility(config: dict) -> None:
+    task_config = config.get("task", {})
+    model_config = config.get("model", {})
+    items = _task_items(task_config)
+    needs_coefficient_head = any(item.get("domain") == "coefficients" for item in items)
+    coefficient_head_kwargs = model_config.get("coefficient_head_kwargs")
+
+    if needs_coefficient_head:
+        if not task_config.get("coefficient_target_list"):
+            raise ValueError("Task uses coefficient losses/eval fields but coefficient_target_list is empty.")
+        if not coefficient_head_kwargs:
+            raise ValueError(
+                "Task uses coefficient losses/eval fields but model has no coefficient_head_kwargs. "
+                "Use a coefficient model size such as MediumCoeff or remove coefficient items from the task."
+            )
+    elif "coefficient_head_kwargs" in model_config:
+        model_config.pop("coefficient_head_kwargs", None)
+        print(
+            "Config check: removed coefficient_head_kwargs because task has no coefficient losses/eval fields.",
+            flush=True,
+        )
+
+    query_out_channels = int(model_config.get("decoder_kwargs", {}).get("out_channels", 0))
+    query_required = _max_pred_slice_end(items, {"surface", "volume"})
+    if query_out_channels and query_required > query_out_channels:
+        raise ValueError(
+            f"Task query pred_slice requires {query_required} output channels, "
+            f"but model decoder out_channels={query_out_channels}."
+        )
+    if needs_coefficient_head:
+        coeff_out_channels = int(coefficient_head_kwargs.get("out_channels", 0))
+        coeff_required = _max_pred_slice_end(items, {"coefficients"})
+        if coeff_out_channels and coeff_required > coeff_out_channels:
+            raise ValueError(
+                f"Task coefficient pred_slice requires {coeff_required} output channels, "
+                f"but coefficient head out_channels={coeff_out_channels}."
+            )
+
+
 def load_main_config(path: str) -> dict:
     config = load_config(path)
     config["_dataset_name"] = config.get("dataset")
@@ -201,6 +264,7 @@ def load_main_config(path: str) -> dict:
     config["_model_size"] = config.get("model_size")
     config["dataset"] = load_config(_resolve_dataset_option_path(config))
     config["model"] = load_config(_resolve_model_size_path(config))
+    _check_task_model_compatibility(config)
     return config
 
 

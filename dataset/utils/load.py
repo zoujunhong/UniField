@@ -18,6 +18,9 @@ FIELD_DIMS = {
     "normals": 3,
     "area": 1,
     "log_area": 1,
+    "surface_distance": 1,
+    "wall_distance": 1,
+    "sdf": 1,
 }
 
 
@@ -145,6 +148,41 @@ def take_data_array(mesh: pv.DataSet, field: str, location: str) -> np.ndarray:
     return np.asarray(data[field], dtype=np.float32)
 
 
+def compute_cell_vertex_mean_centers(mesh: pv.DataSet) -> np.ndarray:
+    """Compute cell centers as the mean of each cell's vertex coordinates."""
+    if mesh.n_cells == 0:
+        return np.empty((0, 3), dtype=np.float32)
+
+    points = np.asarray(mesh.points, dtype=np.float32)
+    offsets_raw = getattr(mesh, "offset", None)
+    connectivity_raw = getattr(mesh, "cell_connectivity", None)
+    offsets = None if offsets_raw is None else np.asarray(offsets_raw, dtype=np.int64)
+    connectivity = None if connectivity_raw is None else np.asarray(connectivity_raw, dtype=np.int64)
+    if (
+        offsets is not None
+        and connectivity is not None
+        and offsets.size == mesh.n_cells + 1
+        and connectivity.size == int(offsets[-1])
+    ):
+        counts = np.diff(offsets).astype(np.float32, copy=False)
+        if np.all(counts > 0):
+            starts = offsets[:-1]
+            centers = np.empty((mesh.n_cells, 3), dtype=np.float32)
+            for axis in range(3):
+                values = points[connectivity, axis]
+                centers[:, axis] = np.add.reduceat(values, starts) / counts
+            return centers
+
+    centers = np.empty((mesh.n_cells, 3), dtype=np.float32)
+    for cell_idx in range(mesh.n_cells):
+        cell_points = np.asarray(mesh.get_cell(cell_idx).points, dtype=np.float32)
+        if cell_points.size == 0:
+            centers[cell_idx] = np.nan
+        else:
+            centers[cell_idx] = cell_points.mean(axis=0)
+    return centers
+
+
 def read_drivaer_surface_pressure(vtk_file_path: str | Path) -> np.ndarray:
     mesh = pv.read(vtk_file_path)
     surface = surface_polydata(mesh)
@@ -164,6 +202,16 @@ def read_drivaer_surface_pressure(vtk_file_path: str | Path) -> np.ndarray:
         np.float32,
         copy=False,
     )
+
+
+def read_drivaer_surface_points(vtk_file_path: str | Path) -> np.ndarray:
+    mesh = pv.read(vtk_file_path)
+    surface = surface_polydata(mesh)
+    if surface.n_points > 0:
+        return np.asarray(surface.points, dtype=np.float32)
+    if surface.n_cells > 0:
+        return np.asarray(surface.cell_centers().points, dtype=np.float32)
+    raise ValueError(f"No surface points found in {vtk_file_path}.")
 
 
 def read_drivaer_volume_velocity(vtk_file_path: str | Path, location: str = "point") -> np.ndarray:
@@ -227,7 +275,7 @@ def list_high_speed_cases(root_dir: str | Path, train_type: str) -> list[Path]:
 def read_high_speed_field(vtk_file_path: str | Path, include_geometry: bool, location: str = "cell") -> np.ndarray:
     mesh = pv.read(vtk_file_path)
     if location == "cell":
-        points = np.asarray(mesh.cell_centers().points, dtype=np.float32)
+        points = compute_cell_vertex_mean_centers(mesh)
         data_location = "cell"
     elif location == "point":
         points = np.asarray(mesh.points, dtype=np.float32)

@@ -5,12 +5,14 @@ from pathlib import Path
 
 import numpy as np
 import torch
+from scipy.spatial import cKDTree
 from torch.utils.data import DataLoader, Dataset, Subset
 
 from dataset.utils.load import (
     list_vtk_files,
     matched_vtk_names,
     read_drivaer_surface_pressure,
+    read_drivaer_surface_points,
     read_drivaer_volume_velocity,
 )
 from dataset.utils.sampling import filter_names, sample_rows_np, voxel_uniform_sample_rows
@@ -29,6 +31,10 @@ def cache_dir(cache_root: str | Path, kind: str, points: int) -> str:
 
 def cache_path(cache_root: str | Path, kind: str, points: int, case_name: str) -> str:
     return os.path.join(cache_dir(cache_root, kind, points), f"{case_name}.npy")
+
+
+def wall_distance_cache_path(cache_root: str | Path, points: int, case_name: str) -> str:
+    return cache_path(cache_root, "volume_wall_distance", points, case_name)
 
 
 def identity_collate(batch):
@@ -166,6 +172,110 @@ class DrivAerNetPlusPlusCacheBuilder(Dataset):
             case_name = self.case_names[global_i]
             if log_every > 0 and (local_i % log_every == 0 or global_i + 1 == end):
                 print(f"[{global_i + 1}/{len(self)}] cached {case_name}", flush=True)
+
+
+class DrivAerNetPlusPlusWallDistanceCacheBuilder(Dataset):
+    """
+    Build incremental wall-distance caches for existing DrivAerNet++ volume caches.
+
+    The output rows are one-to-one with the existing volume_random cache rows:
+        [raw_nearest_surface_distance]
+    """
+
+    def __init__(
+        self,
+        root_dir: str = DRIVAERNET_ROOT,
+        cache_root: str | None = None,
+        volume_cache_points: int = DEFAULT_VOLUME_CACHE_POINTS,
+        ids_file: str | None = None,
+        overwrite: bool = False,
+    ) -> None:
+        self.root_dir = root_dir
+        self.pressure_dir = os.path.join(root_dir, "Pressure")
+        self.cfd_dir = os.path.join(root_dir, "CFD")
+        self.cache_root = cache_root or os.path.join(root_dir, "cache")
+        self.volume_cache_points = int(volume_cache_points)
+        self.overwrite = bool(overwrite)
+
+        self.pressure_files = list_vtk_files(self.pressure_dir)
+        self.case_names = filter_names(matched_vtk_names(self.pressure_dir, self.cfd_dir), ids_file)
+        if not self.case_names:
+            raise RuntimeError("No DrivAerNet++ cases matched the requested ids_file.")
+        os.makedirs(cache_dir(self.cache_root, "volume_wall_distance", self.volume_cache_points), exist_ok=True)
+
+        print(f"DrivAerNet++ wall-distance cache builder: {len(self.case_names)} matched cases.")
+
+    def __len__(self) -> int:
+        return len(self.case_names)
+
+    def _volume_path(self, case_name: str) -> str:
+        return cache_path(self.cache_root, "volume_random", self.volume_cache_points, case_name)
+
+    def _wall_distance_path(self, case_name: str) -> str:
+        return wall_distance_cache_path(self.cache_root, self.volume_cache_points, case_name)
+
+    def __getitem__(self, idx: int) -> dict[str, str | float | int]:
+        case_name = self.case_names[idx]
+        out_path = self._wall_distance_path(case_name)
+        if os.path.exists(out_path) and not self.overwrite:
+            return {"volume_wall_distance": out_path, "case_name": case_name, "skipped": 1}
+
+        volume_path = self._volume_path(case_name)
+        if not os.path.exists(volume_path):
+            raise FileNotFoundError(
+                f"Missing DrivAerNet++ volume cache: {volume_path}. "
+                "Build volume_random cache before wall-distance cache."
+            )
+
+        volume = np.load(volume_path, mmap_mode="r")
+        if volume.ndim != 2 or volume.shape[1] < 3:
+            raise ValueError(f"Invalid volume cache shape for {case_name}: {volume.shape}.")
+        surface_points = read_drivaer_surface_points(self.pressure_files[case_name])
+        distance = cKDTree(surface_points).query(np.asarray(volume[:, :3], dtype=np.float32), workers=-1)[0]
+        distance = np.asarray(distance, dtype=np.float32).reshape(-1, 1)
+        if not np.isfinite(distance).all() or np.any(distance < 0.0):
+            raise ValueError(f"Invalid wall distances computed for {case_name}.")
+
+        np.save(out_path, distance.astype(np.float16))
+        return {
+            "volume_wall_distance": out_path,
+            "case_name": case_name,
+            "rows": int(distance.shape[0]),
+            "distance_min": float(distance.min()) if distance.size else 0.0,
+            "distance_max": float(distance.max()) if distance.size else 0.0,
+            "distance_mean": float(distance.mean()) if distance.size else 0.0,
+        }
+
+    def build_cache(
+        self,
+        start_index: int = 0,
+        limit: int | None = None,
+        log_every: int = 1,
+        num_workers: int = 0,
+    ) -> None:
+        end = len(self) if limit is None else min(len(self), int(start_index) + int(limit))
+        indices = list(range(int(start_index), end))
+        if num_workers <= 0:
+            for i in indices:
+                case_name = self.case_names[i]
+                self[i]
+                if log_every > 0 and ((i - start_index + 1) % log_every == 0 or i + 1 == end):
+                    print(f"[{i + 1}/{len(self)}] cached wall distance {case_name}", flush=True)
+            return
+
+        subset = Subset(self, indices)
+        loader = DataLoader(
+            subset,
+            batch_size=1,
+            shuffle=False,
+            num_workers=num_workers,
+            collate_fn=identity_collate,
+        )
+        for local_i, _ in enumerate(loader, start=1):
+            global_i = int(start_index) + local_i - 1
+            case_name = self.case_names[global_i]
+            if log_every > 0 and (local_i % log_every == 0 or global_i + 1 == end):
+                print(f"[{global_i + 1}/{len(self)}] cached wall distance {case_name}", flush=True)
 
 
 def running_cache_stats(paths: list[str], columns: list[int], log_every: int = 100):

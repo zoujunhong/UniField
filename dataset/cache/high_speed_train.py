@@ -7,17 +7,48 @@ from pathlib import Path
 import numpy as np
 from torch.utils.data import DataLoader, Dataset, Subset
 
-from dataset.utils.load import list_high_speed_cases, read_high_speed_field
+from dataset.utils.load import high_speed_type_dir, list_high_speed_cases, read_high_speed_field
 from dataset.utils.sampling import sample_rows_np, voxel_uniform_sample_rows
 
 
 HIGH_SPEED_TRAIN_ROOT = "/data/home/zdhs0017/OpenFOAM/Cases/high_speed_train_debug_parallel_data"
 DEFAULT_SURFACE_CACHE_POINTS = 100_000
 DEFAULT_VOLUME_CACHE_POINTS = 300_000
+DEFAULT_CACHE_DTYPE = "fp32"
 HIGH_SPEED_TRAIN_GEOMETRY_COUNTS = {
     "CRH450": 20,
     "Maglev": 30,
 }
+HIGH_SPEED_SURFACE_CACHE_COLUMNS = (
+    "x",
+    "y",
+    "z",
+    "p",
+    "Ux",
+    "Uy",
+    "Uz",
+    "k",
+    "omega",
+    "nut",
+    "nx",
+    "ny",
+    "nz",
+    "area",
+)
+HIGH_SPEED_VOLUME_CACHE_COLUMNS = (
+    "x",
+    "y",
+    "z",
+    "p",
+    "Ux",
+    "Uy",
+    "Uz",
+    "k",
+    "omega",
+    "nut",
+    "surface_distance",
+)
+HIGH_SPEED_VOLUME_SURFACE_DISTANCE_COL = 10
 
 
 def normalized_train_type(train_type: str) -> str:
@@ -39,25 +70,53 @@ def high_speed_case_sort_key(path_or_name: str | Path) -> tuple[int, int, str]:
     return (-1 if geo_id is None else geo_id, run_id, name)
 
 
-def cache_dir(cache_root: str | Path, train_type: str, kind: str, points: int) -> str:
-    return os.path.join(str(cache_root), normalized_train_type(train_type), f"{kind}_{int(points)}_fp16")
+def normalized_cache_dtype(cache_dtype: str) -> str:
+    cache_dtype = str(cache_dtype).lower()
+    if cache_dtype not in {"fp16", "fp32"}:
+        raise ValueError("cache_dtype must be 'fp16' or 'fp32'.")
+    return cache_dtype
 
 
-def cache_path(cache_root: str | Path, train_type: str, kind: str, points: int, case_name: str) -> str:
-    return os.path.join(cache_dir(cache_root, train_type, kind, points), f"{case_name}.npy")
+def cache_numpy_dtype(cache_dtype: str) -> np.dtype:
+    cache_dtype = normalized_cache_dtype(cache_dtype)
+    return np.dtype(np.float16 if cache_dtype == "fp16" else np.float32)
+
+
+def cache_dir(
+    cache_root: str | Path,
+    train_type: str,
+    kind: str,
+    points: int,
+    cache_dtype: str = DEFAULT_CACHE_DTYPE,
+) -> str:
+    cache_dtype = normalized_cache_dtype(cache_dtype)
+    return os.path.join(str(cache_root), normalized_train_type(train_type), f"{kind}_{int(points)}_{cache_dtype}")
+
+
+def cache_path(
+    cache_root: str | Path,
+    train_type: str,
+    kind: str,
+    points: int,
+    case_name: str,
+    cache_dtype: str = DEFAULT_CACHE_DTYPE,
+) -> str:
+    return os.path.join(cache_dir(cache_root, train_type, kind, points, cache_dtype), f"{case_name}.npy")
 
 
 def identity_collate(batch):
     return batch
 
 
-def valid_npy_cache(path: str | Path, min_cols: int = 1) -> bool:
+def valid_npy_cache(path: str | Path, min_cols: int = 1, dtype: str | np.dtype | None = None) -> bool:
     path = Path(path)
     if not path.is_file() or path.stat().st_size <= 0:
         return False
     try:
         arr = np.load(path, mmap_mode="r")
         if arr.ndim != 2 or arr.shape[0] <= 0 or arr.shape[1] < int(min_cols):
+            return False
+        if dtype is not None and arr.dtype != np.dtype(dtype):
             return False
     except Exception:
         return False
@@ -76,6 +135,109 @@ def atomic_save_npy(path: str | Path, arr: np.ndarray) -> None:
             tmp_path.unlink()
 
 
+def _surface_cache_path_for_distance(
+    cache_root: str | Path,
+    train_type: str,
+    surface_cache_points: int,
+    case_name: str,
+    cache_dtype: str,
+) -> str:
+    for kind in ("surface_uniform", "surface_random"):
+        path = cache_path(cache_root, train_type, kind, surface_cache_points, case_name, cache_dtype)
+        if valid_npy_cache(path, min_cols=3, dtype=cache_numpy_dtype(cache_dtype)):
+            return path
+    raise FileNotFoundError(
+        "Missing HighSpeedTrain surface cache for distance computation: "
+        f"{normalized_train_type(train_type)}/{case_name}, points={int(surface_cache_points)}, dtype={cache_dtype}."
+    )
+
+
+def _full_surface_points_for_distance(
+    root_dir: str | Path,
+    train_type: str,
+    case_name: str,
+) -> tuple[str, np.ndarray]:
+    import pyvista as pv
+
+    surface_path = high_speed_type_dir(root_dir, train_type) / case_name / "surface.vtk"
+    if not surface_path.is_file() or surface_path.stat().st_size <= 0:
+        raise FileNotFoundError(f"Missing HighSpeedTrain surface VTK for distance computation: {surface_path}")
+
+    mesh = pv.read(surface_path)
+    if mesh.n_cells > 0:
+        points = np.asarray(mesh.cell_centers().points, dtype=np.float32)
+    else:
+        points = np.asarray(mesh.points, dtype=np.float32)
+    return str(surface_path), points
+
+
+def append_surface_distance_to_volume_cache(
+    cache_root: str | Path,
+    train_type: str,
+    case_name: str,
+    root_dir: str = HIGH_SPEED_TRAIN_ROOT,
+    surface_cache_points: int = DEFAULT_SURFACE_CACHE_POINTS,
+    volume_cache_points: int = DEFAULT_VOLUME_CACHE_POINTS,
+    cache_dtype: str = DEFAULT_CACHE_DTYPE,
+    clip: float | None = None,
+    overwrite: bool = False,
+    surface_distance_source: str = "surface_vtk",
+) -> dict[str, str | int | float | bool]:
+    """Append or refresh volume-cache column 10 with distance to the case surface."""
+    from scipy.spatial import cKDTree
+
+    if surface_distance_source not in {"surface_vtk", "surface_cache"}:
+        raise ValueError("surface_distance_source must be 'surface_vtk' or 'surface_cache'.")
+
+    cache_dtype = normalized_cache_dtype(cache_dtype)
+    cache_np_dtype = cache_numpy_dtype(cache_dtype)
+    volume_path = cache_path(cache_root, train_type, "volume_random", volume_cache_points, case_name, cache_dtype)
+    if not valid_npy_cache(volume_path, min_cols=10, dtype=cache_np_dtype):
+        raise FileNotFoundError(f"Missing or invalid HighSpeedTrain volume cache: {volume_path}")
+
+    volume = np.load(volume_path).astype(np.float32, copy=False)
+    if volume.shape[1] > HIGH_SPEED_VOLUME_SURFACE_DISTANCE_COL and not overwrite:
+        return {
+            "case_name": case_name,
+            "status": "exists",
+            "path": volume_path,
+            "rows": int(volume.shape[0]),
+            "cols": int(volume.shape[1]),
+        }
+
+    if surface_distance_source == "surface_vtk":
+        surface_path, surface_points = _full_surface_points_for_distance(root_dir, train_type, case_name)
+    else:
+        surface_path = _surface_cache_path_for_distance(cache_root, train_type, surface_cache_points, case_name, cache_dtype)
+        surface = np.load(surface_path, mmap_mode="r")
+        surface_points = np.asarray(surface[:, :3], dtype=np.float32)
+
+    tree = cKDTree(surface_points)
+    distance = tree.query(np.asarray(volume[:, :3], dtype=np.float32), workers=-1)[0].astype(np.float32)
+    if clip is not None:
+        distance = np.minimum(distance, float(clip)).astype(np.float32, copy=False)
+    distance = distance.reshape(-1, 1)
+
+    if volume.shape[1] > HIGH_SPEED_VOLUME_SURFACE_DISTANCE_COL:
+        updated = volume.copy()
+        updated[:, HIGH_SPEED_VOLUME_SURFACE_DISTANCE_COL : HIGH_SPEED_VOLUME_SURFACE_DISTANCE_COL + 1] = distance
+    else:
+        updated = np.concatenate([volume, distance], axis=1)
+    atomic_save_npy(volume_path, updated.astype(cache_np_dtype, copy=False))
+    return {
+        "case_name": case_name,
+        "status": "updated",
+        "path": volume_path,
+        "surface_path": surface_path,
+        "surface_distance_source": surface_distance_source,
+        "rows": int(updated.shape[0]),
+        "cols": int(updated.shape[1]),
+        "distance_min": float(distance.min()) if distance.size else 0.0,
+        "distance_max": float(distance.max()) if distance.size else 0.0,
+        "distance_mean": float(distance.mean()) if distance.size else 0.0,
+    }
+
+
 def complete_high_speed_raw_case(case_dir: str | Path, build_surface: bool, build_volume: bool) -> bool:
     case_dir = Path(case_dir)
     if build_surface:
@@ -91,12 +253,12 @@ def complete_high_speed_raw_case(case_dir: str | Path, build_surface: bool, buil
 
 class HighSpeedTrainCacheBuilder(Dataset):
     """
-    Build fp16 caches for high_speed_train cases.
+    Build dtype-selected caches for high_speed_train cases.
 
     Surface rows:
         [x, y, z, p, Ux, Uy, Uz, k, omega, nut, nx, ny, nz, area]
     Volume rows:
-        [x, y, z, p, Ux, Uy, Uz, k, omega, nut]
+        [x, y, z, p, Ux, Uy, Uz, k, omega, nut, surface_distance]
     """
 
     def __init__(
@@ -107,32 +269,46 @@ class HighSpeedTrainCacheBuilder(Dataset):
         surface_cache_points: int = DEFAULT_SURFACE_CACHE_POINTS,
         volume_cache_points: int = DEFAULT_VOLUME_CACHE_POINTS,
         surface_sampling: str = "random",
+        cache_dtype: str = DEFAULT_CACHE_DTYPE,
         overwrite: bool = False,
         build_surface: bool = True,
         build_volume: bool = True,
+        build_volume_surface_distance: bool = True,
+        surface_distance_clip: float | None = None,
+        surface_distance_source: str = "surface_vtk",
         skip_incomplete: bool = True,
     ) -> None:
         if surface_sampling not in {"random", "uniform"}:
             raise ValueError("surface_sampling must be 'random' or 'uniform'.")
+        if surface_distance_source not in {"surface_vtk", "surface_cache"}:
+            raise ValueError("surface_distance_source must be 'surface_vtk' or 'surface_cache'.")
         self.root_dir = root_dir
         self.train_type = normalized_train_type(train_type)
         self.cache_root = cache_root or os.path.join(root_dir, "cache")
         self.surface_cache_points = int(surface_cache_points)
         self.volume_cache_points = int(volume_cache_points)
         self.surface_sampling = surface_sampling
+        self.cache_dtype = normalized_cache_dtype(cache_dtype)
+        self.cache_np_dtype = cache_numpy_dtype(self.cache_dtype)
         self.overwrite = bool(overwrite)
         self.build_surface = bool(build_surface)
         self.build_volume = bool(build_volume)
+        self.build_volume_surface_distance = bool(build_volume_surface_distance)
+        self.surface_distance_clip = None if surface_distance_clip is None else float(surface_distance_clip)
+        self.surface_distance_source = surface_distance_source
         self.skip_incomplete = bool(skip_incomplete)
         if not self.build_surface and not self.build_volume:
             raise ValueError("At least one of build_surface/build_volume must be True.")
 
         case_dirs = sorted(list_high_speed_cases(self.root_dir, self.train_type), key=high_speed_case_sort_key)
         if self.skip_incomplete:
+            need_raw_surface = self.build_surface or (
+                self.build_volume and self.build_volume_surface_distance and self.surface_distance_source == "surface_vtk"
+            )
             complete_case_dirs = [
                 path
                 for path in case_dirs
-                if complete_high_speed_raw_case(path, self.build_surface, self.build_volume)
+                if complete_high_speed_raw_case(path, need_raw_surface, self.build_volume)
             ]
             skipped = len(case_dirs) - len(complete_case_dirs)
             if skipped > 0:
@@ -151,8 +327,8 @@ class HighSpeedTrainCacheBuilder(Dataset):
                 continue
             if kind.startswith("volume") and not self.build_volume:
                 continue
-            os.makedirs(cache_dir(self.cache_root, self.train_type, kind, points), exist_ok=True)
-        print(f"HighSpeedTrain cache builder: {self.train_type}, {len(self.case_dirs)} cases.")
+            os.makedirs(cache_dir(self.cache_root, self.train_type, kind, points, self.cache_dtype), exist_ok=True)
+        print(f"HighSpeedTrain cache builder: {self.train_type}, {len(self.case_dirs)} cases, dtype={self.cache_dtype}.")
 
     def __len__(self) -> int:
         return len(self.case_dirs)
@@ -176,7 +352,7 @@ class HighSpeedTrainCacheBuilder(Dataset):
 
         if self.build_surface:
             kind = f"surface_{self.surface_sampling}"
-            out_path = cache_path(self.cache_root, self.train_type, kind, self.surface_cache_points, case_dir.name)
+            out_path = cache_path(self.cache_root, self.train_type, kind, self.surface_cache_points, case_dir.name, self.cache_dtype)
             if self.overwrite or not os.path.exists(out_path):
                 rows = self._read_case_field(case_dir, "surface.vtk", include_geometry=True)
                 if rows is not None:
@@ -184,31 +360,53 @@ class HighSpeedTrainCacheBuilder(Dataset):
                         rows = voxel_uniform_sample_rows(rows, self.surface_cache_points, rng)
                     else:
                         rows = sample_rows_np(rows, self.surface_cache_points, rng)
-                    atomic_save_npy(out_path, rows.astype(np.float16))
-            elif not valid_npy_cache(out_path, min_cols=14):
+                    atomic_save_npy(out_path, rows.astype(self.cache_np_dtype))
+            elif not valid_npy_cache(out_path, min_cols=14, dtype=self.cache_np_dtype):
                 rows = self._read_case_field(case_dir, "surface.vtk", include_geometry=True)
                 if rows is not None:
                     if self.surface_sampling == "uniform":
                         rows = voxel_uniform_sample_rows(rows, self.surface_cache_points, rng)
                     else:
                         rows = sample_rows_np(rows, self.surface_cache_points, rng)
-                    atomic_save_npy(out_path, rows.astype(np.float16))
-            if valid_npy_cache(out_path, min_cols=14):
+                    atomic_save_npy(out_path, rows.astype(self.cache_np_dtype))
+            if valid_npy_cache(out_path, min_cols=14, dtype=self.cache_np_dtype):
                 written[kind] = out_path
 
         if self.build_volume:
-            out_path = cache_path(self.cache_root, self.train_type, "volume_random", self.volume_cache_points, case_dir.name)
+            out_path = cache_path(self.cache_root, self.train_type, "volume_random", self.volume_cache_points, case_dir.name, self.cache_dtype)
             if self.overwrite or not os.path.exists(out_path):
                 rows = self._read_case_field(case_dir, "full_field.vtk", include_geometry=False)
                 if rows is not None:
                     rows = sample_rows_np(rows, self.volume_cache_points, rng)
-                    atomic_save_npy(out_path, rows.astype(np.float16))
-            elif not valid_npy_cache(out_path, min_cols=10):
+                    atomic_save_npy(out_path, rows.astype(self.cache_np_dtype))
+            elif not valid_npy_cache(out_path, min_cols=10, dtype=self.cache_np_dtype):
                 rows = self._read_case_field(case_dir, "full_field.vtk", include_geometry=False)
                 if rows is not None:
                     rows = sample_rows_np(rows, self.volume_cache_points, rng)
-                    atomic_save_npy(out_path, rows.astype(np.float16))
-            if valid_npy_cache(out_path, min_cols=10):
+                    atomic_save_npy(out_path, rows.astype(self.cache_np_dtype))
+            if self.build_volume_surface_distance and valid_npy_cache(out_path, min_cols=10, dtype=self.cache_np_dtype):
+                try:
+                    append_surface_distance_to_volume_cache(
+                        self.cache_root,
+                        self.train_type,
+                        case_dir.name,
+                        root_dir=self.root_dir,
+                        surface_cache_points=self.surface_cache_points,
+                        volume_cache_points=self.volume_cache_points,
+                        cache_dtype=self.cache_dtype,
+                        clip=self.surface_distance_clip,
+                        overwrite=self.overwrite,
+                        surface_distance_source=self.surface_distance_source,
+                    )
+                except FileNotFoundError as exc:
+                    if not self.skip_incomplete:
+                        raise
+                    print(
+                        f"HighSpeedTrain cache builder: skipped surface distance for {case_dir.name}: {exc}",
+                        flush=True,
+                    )
+            min_cols = HIGH_SPEED_VOLUME_SURFACE_DISTANCE_COL + 1 if self.build_volume_surface_distance else 10
+            if valid_npy_cache(out_path, min_cols=min_cols, dtype=self.cache_np_dtype):
                 written["volume_random"] = out_path
         return written
 
