@@ -1,0 +1,10 @@
+CONFIG = {'output_channels': 4, 'native_model_name': 'SMARTFieldModel',
+ 'native_model_kwargs': {'latent_dim': 256,
+                         'num_heads': 8,
+                         'latent_geometry_points': 2048,
+                         'subsampled_geometry_points': 8192,
+                         'num_encoder_decoder_blocks': 6,
+                         'surface_channels': 1,
+                         'volume_channels': 4,
+                         'parameter_channels': 0,
+                         'dropout': 0.0}}

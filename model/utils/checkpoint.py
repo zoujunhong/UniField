@@ -96,6 +96,26 @@ def _partial_leading_dim_load(dst: torch.Tensor, src: torch.Tensor) -> torch.Ten
     return merged
 
 
+def _partial_adaln_condition_load(name: str, dst: torch.Tensor, src: torch.Tensor) -> torch.Tensor | None:
+    """Extend only the first AdaLN condition layer with zero new inputs.
+
+    Utonia coordinate normalization augments the external [speed, placement]
+    condition with a radius.  This helper deliberately applies to no other
+    Linear layer: copying arbitrary trailing dimensions is unsafe, whereas a
+    zero radius column preserves the old model exactly at initialization.
+    """
+
+    if not name.endswith(".adaLN_modulation.0.weight"):
+        return None
+    if src.ndim != 2 or dst.ndim != 2:
+        return None
+    if src.shape[0] != dst.shape[0] or src.shape[1] > dst.shape[1]:
+        return None
+    merged = torch.zeros_like(dst)
+    merged[:, : src.shape[1]] = src
+    return merged
+
+
 def load_route_compatible_state_dict(
     module: nn.Module,
     checkpoint: Mapping[str, Any],
@@ -134,6 +154,14 @@ def load_route_compatible_state_dict(
                 if merged is not None:
                     target[name] = merged
                     partial_loaded.append(f"{name}: leading slice {tuple(src.shape)} -> {tuple(dst.shape)}")
+                    loaded_names.add(name)
+                    continue
+                merged = _partial_adaln_condition_load(name, dst, src)
+                if merged is not None:
+                    target[name] = merged
+                    partial_loaded.append(
+                        f"{name}: AdaLN condition slice {tuple(src.shape)} -> {tuple(dst.shape)}"
+                    )
                     loaded_names.add(name)
                     continue
             skipped.append(f"{name}: shape mismatch {tuple(src.shape)} -> {tuple(dst.shape)}")

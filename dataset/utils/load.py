@@ -231,25 +231,22 @@ def read_drivaer_volume_velocity(vtk_file_path: str | Path, location: str = "poi
     return np.concatenate([points, velocity], axis=1).astype(np.float32, copy=False)
 
 
-def parse_high_speed_case_cond(path_or_name: str | Path) -> tuple[np.ndarray, float]:
-    name = Path(path_or_name).name
-    match = re.search(r"_Ux_([-+]?\d*\.?\d+)_Uy_([-+]?\d*\.?\d+)(?:$|[._])", name)
-    if match is None:
-        raise ValueError(f"Cannot parse Ux/Uy from case name: {name}")
-    ux = float(match.group(1))
-    uy = float(match.group(2))
-    speed = float((ux * ux + uy * uy) ** 0.5)
-    if speed <= 0.0:
-        raise ValueError(f"Non-positive speed parsed from case name: {name}")
-    return np.array([ux / 100.0, uy / 20.0], dtype=np.float32), speed
-
-
 def high_speed_free_stream(path_or_name: str | Path) -> np.ndarray:
     name = Path(path_or_name).name
     match = re.search(r"_Ux_([-+]?\d*\.?\d+)_Uy_([-+]?\d*\.?\d+)(?:$|[._])", name)
     if match is None:
         raise ValueError(f"Cannot parse Ux/Uy from case name: {name}")
     return np.array([float(match.group(1)), float(match.group(2)), 0.0], dtype=np.float32)
+
+
+def parse_high_speed_case_cond(path_or_name: str | Path) -> tuple[np.ndarray, float]:
+    """Return the common cross-domain condition ``(U_inf / 100, ground=0)``."""
+
+    free_stream = high_speed_free_stream(path_or_name)
+    speed = float(np.linalg.norm(free_stream[:2]))
+    if speed <= 0.0:
+        raise ValueError(f"Non-positive speed parsed from case name: {Path(path_or_name).name}")
+    return np.array([speed / 100.0, 0.0], dtype=np.float32), speed
 
 
 def high_speed_type_dir(root_dir: str | Path, train_type: str) -> Path:

@@ -11,6 +11,7 @@ CONFIG = {
         "volume_target_list": [],
         "surface_sampling": "random",
         "normalization": "physical",
+        "align_freestream": True,
         "repeat": 1,
         "route": 2,
     },

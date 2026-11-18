@@ -12,9 +12,13 @@ from torch.utils.data import DataLoader, Dataset, Subset
 
 from dataset.cache.high_speed_train import (
     HIGH_SPEED_TRAIN_ROOT,
+    HIGH_SPEED_TRAIN_CACHE_ROOT,
     complete_high_speed_raw_case,
     high_speed_case_sort_key,
     normalized_train_type,
+    auxiliary_cache_path,
+    register_auxiliary_cache,
+    shared_cache_dir,
 )
 from dataset.cache.tripnet_high_speed import (
     _bounds_tuple_to_array,
@@ -40,7 +44,7 @@ def gaussian3d_cache_dir(
     knn: int = DEFAULT_GAUSSIAN3D_K,
 ) -> str:
     name = f"gaussian3d_M{int(num_gaussians)}_C{int(channels)}_K{int(knn)}_fp32"
-    return os.path.join(str(cache_root), normalized_train_type(train_type), name)
+    return shared_cache_dir(cache_root, train_type, name)
 
 
 def gaussian3d_cache_path(
@@ -51,7 +55,8 @@ def gaussian3d_cache_path(
     channels: int = DEFAULT_GAUSSIAN3D_CHANNELS,
     knn: int = DEFAULT_GAUSSIAN3D_K,
 ) -> str:
-    return os.path.join(gaussian3d_cache_dir(cache_root, train_type, num_gaussians, channels, knn), f"{case_name}.npz")
+    profile = f"gaussian3d_M{int(num_gaussians)}_C{int(channels)}_K{int(knn)}_fp32"
+    return auxiliary_cache_path(cache_root, case_name, profile, ".npz")
 
 
 def shared_decoder_path(
@@ -355,7 +360,7 @@ class HighSpeedTrainGaussian3DCacheBuilder(Dataset):
     ) -> None:
         self.root_dir = root_dir
         self.train_type = normalized_train_type(train_type)
-        self.cache_root = cache_root or os.path.join(root_dir, "cache")
+        self.cache_root = cache_root or HIGH_SPEED_TRAIN_CACHE_ROOT
         self.num_gaussians = int(num_gaussians)
         self.channels = int(channels)
         self.knn = int(knn)
@@ -582,6 +587,7 @@ class HighSpeedTrainGaussian3DCacheBuilder(Dataset):
             knn=np.array(self.knn, dtype=np.int32),
             loss=np.array(loss, dtype=np.float32),
         )
+        register_auxiliary_cache(path, arrays=arrays, shared_decoder=self.decoder_path)
         return {"gaussian3d": path, "loss": loss}
 
     def build_cache(

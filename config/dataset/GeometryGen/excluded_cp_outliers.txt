@@ -1,0 +1,8 @@
+# Full native-field audit rule: exclude a case when Cp_min < -8 or Cp_max > 5.
+# These five cases contain isolated spikes whose nearest faces return to the
+# ordinary Cp range; see temp/20261005_013000_geometrygen_surface_memory/cp_audit.
+case_000032
+case_001100
+case_001198
+case_001430
+case_001699

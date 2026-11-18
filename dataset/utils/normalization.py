@@ -8,6 +8,7 @@ import numpy as np
 DEFAULT_U_REF = 30.0
 DEFAULT_PRESSURE_SCALE = 450.0
 DEFAULT_VELOCITY_SCALE = 30.0
+DRIVAERNET_CP_CLIP_RANGE = (-3.0, 1.1)
 
 PRESSURE_MEAN = -94.5
 PRESSURE_STD = 117.25
@@ -83,17 +84,33 @@ def normalize_drivaer_field(
     pressure_std: float = PRESSURE_STD,
     velocity_mean: Iterable[float] = VELOCITY_MEAN,
     velocity_std: Iterable[float] = VELOCITY_STD,
+    clip_cp: bool = False,
 ) -> np.ndarray:
     values = values.astype(np.float32, copy=True)
-    if normalization == "none":
-        return values
-    if normalization not in {"physical", "standard"}:
+    if normalization not in {"physical", "standard", "none"}:
         raise ValueError("normalization must be 'physical', 'standard', or 'none'.")
 
     if name == "p":
+        dynamic_pressure = max(0.5 * float(u_ref) * float(u_ref), 1e-12)
+        if clip_cp:
+            cp = np.clip(
+                values / dynamic_pressure,
+                DRIVAERNET_CP_CLIP_RANGE[0],
+                DRIVAERNET_CP_CLIP_RANGE[1],
+            )
+            if normalization == "physical":
+                return cp
+            # Both standard and none operate on pressure, so convert the
+            # clipped Cp back to pressure before applying their output rule.
+            values = cp * dynamic_pressure
+        if normalization == "none":
+            return values
         if normalization == "physical":
-            return values / max(0.5 * float(u_ref) * float(u_ref), 1e-12)
+            return values / dynamic_pressure
         return (values - float(pressure_mean)) / max(float(pressure_std), 1e-12)
+
+    if normalization == "none":
+        return values
 
     if name == "U":
         if normalization == "physical":

@@ -3,6 +3,50 @@ from __future__ import annotations
 import torch
 
 
+class Lion(torch.optim.Optimizer):
+    """Minimal decoupled-weight-decay Lion optimizer used by the SMART baseline."""
+
+    def __init__(
+        self,
+        params,
+        lr: float = 1e-4,
+        betas: tuple[float, float] = (0.9, 0.99),
+        weight_decay: float = 0.0,
+    ) -> None:
+        if lr < 0.0:
+            raise ValueError(f"Invalid learning rate: {lr}")
+        if len(betas) != 2 or not all(0.0 <= beta < 1.0 for beta in betas):
+            raise ValueError(f"Invalid Lion betas: {betas}")
+        if weight_decay < 0.0:
+            raise ValueError(f"Invalid weight decay: {weight_decay}")
+        defaults = dict(lr=float(lr), betas=tuple(float(beta) for beta in betas), weight_decay=float(weight_decay))
+        super().__init__(params, defaults)
+
+    @torch.no_grad()
+    def step(self, closure=None):
+        loss = None if closure is None else closure()
+        for group in self.param_groups:
+            beta1, beta2 = group["betas"]
+            lr = group["lr"]
+            weight_decay = group["weight_decay"]
+            for parameter in group["params"]:
+                gradient = parameter.grad
+                if gradient is None:
+                    continue
+                if gradient.is_sparse:
+                    raise RuntimeError("Lion does not support sparse gradients.")
+                if weight_decay:
+                    parameter.mul_(1.0 - lr * weight_decay)
+                state = self.state[parameter]
+                if not state:
+                    state["exp_avg"] = torch.zeros_like(parameter)
+                exp_avg = state["exp_avg"]
+                update = exp_avg.lerp(gradient, 1.0 - beta1)
+                parameter.add_(update.sign(), alpha=-lr)
+                exp_avg.lerp_(gradient, 1.0 - beta2)
+        return loss
+
+
 def get_params_groups(
     model: torch.nn.Module,
     lr: float = 0.001,
@@ -51,7 +95,7 @@ def get_params_groups(
 
 
 def build_optimizer(model: torch.nn.Module, config: dict) -> torch.optim.Optimizer:
-    name = config.get("name", "AdamW")
+    name = str(config.get("name", "AdamW"))
     kwargs = dict(config.get("kwargs", {}))
     lr = float(kwargs.pop("lr", config.get("lr", 1e-4)))
     weight_decay = float(kwargs.pop("weight_decay", config.get("weight_decay", 0.04)))
@@ -66,4 +110,13 @@ def build_optimizer(model: torch.nn.Module, config: dict) -> torch.optim.Optimiz
         return torch.optim.AdamW(param_groups, lr=lr, **kwargs)
     if name == "Adam":
         return torch.optim.Adam(param_groups, lr=lr, **kwargs)
+    if name == "Ranger":
+        from utils.ranger2020 import Ranger
+        return Ranger(param_groups, lr=lr, **kwargs)
+    if name == "Lion":
+        kwargs.pop("eps", None)
+        return Lion(param_groups, lr=lr, **kwargs)
     raise ValueError(f"Unsupported optimizer: {name}")
+
+
+__all__ = ["Lion", "build_optimizer", "get_params_groups"]

@@ -12,9 +12,13 @@ from torch.utils.data import DataLoader, Dataset, Subset
 
 from dataset.cache.high_speed_train import (
     HIGH_SPEED_TRAIN_ROOT,
+    HIGH_SPEED_TRAIN_CACHE_ROOT,
     complete_high_speed_raw_case,
     high_speed_case_sort_key,
     normalized_train_type,
+    auxiliary_cache_path,
+    register_auxiliary_cache,
+    shared_cache_dir,
 )
 from dataset.utils.high_speed_train_dataset import _split_high_speed_names_by_geometry
 from dataset.utils.load import high_speed_type_dir, list_high_speed_cases
@@ -33,7 +37,7 @@ def triplane_cache_dir(
     resolution: int = DEFAULT_TRIPLANE_RESOLUTION,
 ) -> str:
     name = f"triplane_{int(channels)}x{int(resolution)}x{int(resolution)}_fp32"
-    return os.path.join(str(cache_root), normalized_train_type(train_type), name)
+    return shared_cache_dir(cache_root, train_type, name)
 
 
 def triplane_cache_path(
@@ -43,7 +47,8 @@ def triplane_cache_path(
     channels: int = DEFAULT_TRIPLANE_CHANNELS,
     resolution: int = DEFAULT_TRIPLANE_RESOLUTION,
 ) -> str:
-    return os.path.join(triplane_cache_dir(cache_root, train_type, channels, resolution), f"{case_name}.npz")
+    profile = f"triplane_{int(channels)}x{int(resolution)}x{int(resolution)}_fp32"
+    return auxiliary_cache_path(cache_root, case_name, profile, ".npz")
 
 
 def shared_decoder_path(
@@ -88,6 +93,10 @@ def _atomic_save_npz(path: str | Path, **arrays) -> None:
     try:
         np.savez(tmp_path, **arrays)
         os.replace(tmp_path, path)
+        case = path.parents[2].name
+        train_type = normalized_train_type(case.split("_geo_", 1)[0])
+        decoder = Path(shared_cache_dir(path.parents[4], train_type, path.parent.name)) / "_shared_occupancy_decoder.pt"
+        register_auxiliary_cache(path, arrays=arrays, shared_decoder=decoder)
     finally:
         if tmp_path.exists():
             tmp_path.unlink()
@@ -287,7 +296,7 @@ class HighSpeedTrainTriplaneCacheBuilder(Dataset):
     ) -> None:
         self.root_dir = root_dir
         self.train_type = normalized_train_type(train_type)
-        self.cache_root = cache_root or os.path.join(root_dir, "cache")
+        self.cache_root = cache_root or HIGH_SPEED_TRAIN_CACHE_ROOT
         self.channels = int(channels)
         self.resolution = int(resolution)
         self.overwrite = bool(overwrite)

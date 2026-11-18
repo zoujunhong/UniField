@@ -1,0 +1,43 @@
+{
+  "criterion": {
+    "Cd": "abs(Cd_cp_integral - Cd_forceCoeffs) < 0.02",
+    "Cl": "abs(Cl_cp_integral - Cl_forceCoeffs) < 0.02",
+    "logical_operator": "and"
+  },
+  "counts": {
+    "aoa_extrapolation": {
+      "total": 180,
+      "eligible": 180,
+      "excluded": 0
+    },
+    "aoa_interpolation": {
+      "total": 360,
+      "eligible": 360,
+      "excluded": 0
+    },
+    "geometry_generalization": {
+      "total": 878,
+      "eligible": 878,
+      "excluded": 0
+    },
+    "ood_geometry": {
+      "total": 330,
+      "eligible": 330,
+      "excluded": 0
+    },
+    "train": {
+      "total": 1938,
+      "eligible": 1850,
+      "excluded": 88
+    }
+  },
+  "training": {
+    "total": 1938,
+    "retained": 1850,
+    "excluded": 88,
+    "coefficient_scales": {
+      "Cd_std": 0.2545144716357877,
+      "Cl_std": 0.4920542700717882
+    }
+  }
+}

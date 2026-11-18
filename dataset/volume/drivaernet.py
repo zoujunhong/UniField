@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
 
 import numpy as np
 
 from dataset.cache.drivaernet import DEFAULT_VOLUME_CACHE_POINTS, cache_path, wall_distance_cache_path
+from dataset.validation import pressure_valid_rows
 from dataset.utils.normalization import (
     DEFAULT_U_REF,
     PRESSURE_MEAN,
@@ -46,14 +48,22 @@ class DrivAerNetVolumeDataset:
         velocity_std=VELOCITY_STD,
         wall_distance_target_transform: str | None = None,
         mmap: bool = False,
+        clip_cp: bool = False,
+        cache_profile: str | None = None,
+        allow_legacy_flat_cache: bool = False,
     ) -> None:
         if wall_distance_target_transform not in {None, "identity", "sqrt"}:
             raise ValueError("wall_distance_target_transform must be None, 'identity', or 'sqrt'.")
         self.cache_root = cache_root
+        if cache_profile is not None and (not cache_profile or cache_profile in {".", ".."} or Path(cache_profile).name != cache_profile):
+            raise ValueError("cache_profile must be a single directory name or None")
+        self.cache_profile = cache_profile
+        self.allow_legacy_flat_cache = bool(allow_legacy_flat_cache)
         self.num_query_points = int(num_query_points)
         self.volume_target_list = list(volume_target_list or [])
         self.volume_cache_points = int(volume_cache_points)
         self.normalization = normalization
+        self.clip_cp = bool(clip_cp)
         self.u_ref = float(u_ref)
         self.pressure_mean = float(pressure_mean)
         self.pressure_std = float(pressure_std)
@@ -62,14 +72,44 @@ class DrivAerNetVolumeDataset:
         self.wall_distance_target_transform = wall_distance_target_transform
         self.mmap_mode = "r" if mmap else None
 
+    def _case_directory(self, case_name: str) -> Path:
+        directory = Path(self.cache_root) / case_name
+        return directory / "pools" / self.cache_profile if self.cache_profile else directory
+
     def _load_rows(self, case_name: str) -> np.ndarray:
+        canonical = self._case_directory(case_name) / "volume.npy"
+        if canonical.exists():
+            from dataset.field_cache import read_fields
+            return read_fields(canonical, required=("xyz",), mmap_mode=self.mmap_mode)
+        if not self.allow_legacy_flat_cache or self.cache_profile is not None:
+            raise FileNotFoundError(f"Missing DrivAerNet volume cache: {canonical}")
         path = cache_path(self.cache_root, "volume_random", self.volume_cache_points, case_name)
         if not os.path.exists(path):
-            raise FileNotFoundError(
-                f"Missing DrivAerNet++ volume cache: {path}. "
-                "Run DrivAerNetPlusPlusCacheBuilder.build_cache() first."
-            )
-        return np.load(path, mmap_mode=self.mmap_mode).astype(np.float32, copy=False)
+            raise FileNotFoundError(f"Missing explicit legacy DrivAerNet volume cache: {path}")
+        rows = np.load(path, mmap_mode=self.mmap_mode).astype(np.float32, copy=False)
+        if rows.ndim != 2 or rows.shape[1] not in (3, 6, 7, 8):
+            raise ValueError(f"Invalid legacy volume column schema: {path}: {rows.shape}")
+        return rows
+
+    def coordinate_reference(self, case_name: str) -> np.ndarray:
+        """Fallback bbox reference for volume-only DrivAerNet configurations."""
+        return self._raw_field(self._load_rows(case_name), "xyz").copy()
+
+    @staticmethod
+    def _raw_field(rows: np.ndarray, name: str) -> np.ndarray:
+        key = {"p": "pressure", "U": "velocity"}.get(name, name)
+        if rows.dtype.names:
+            if key not in rows.dtype.names:
+                raise ValueError(f"DrivAerNet volume cache lacks required field {key!r}")
+            values = np.asarray(rows[key], dtype=np.float32)
+            return values[:, None] if values.ndim == 1 else values
+        columns = {"xyz": (0, 3), "velocity": (3, 6), "pressure": (6, 7), "wall_distance": (7, 8)}
+        if key not in columns:
+            raise KeyError(f"DrivAerNet volume field {key!r} is not available")
+        begin, end = columns[key]
+        if rows.ndim != 2 or rows.shape[1] < end:
+            raise ValueError(f"DrivAerNet volume cache lacks required field {key!r}")
+        return np.asarray(rows[:, begin:end], dtype=np.float32)
 
     def _needs_wall_distance(self) -> bool:
         return any(field in WALL_DISTANCE_FIELDS for field in self.volume_target_list)
@@ -90,12 +130,16 @@ class DrivAerNetVolumeDataset:
 
     def _field(self, rows: np.ndarray, name: str, wall_distance_rows: np.ndarray | None = None) -> np.ndarray:
         if name == "xyz":
-            return rows[:, :3]
+            return self._raw_field(rows, "xyz")
+        if name == "p":
+            return normalize_drivaer_field("p", self._raw_field(rows, "p"), self.normalization, u_ref=self.u_ref,
+                pressure_mean=self.pressure_mean, pressure_std=self.pressure_std, clip_cp=self.clip_cp)
         if name == "U":
             return normalize_drivaer_field(
                 "U",
-                rows[:, 3:6],
+                self._raw_field(rows, "U"),
                 self.normalization,
+                clip_cp=self.clip_cp,
                 u_ref=self.u_ref,
                 pressure_mean=self.pressure_mean,
                 pressure_std=self.pressure_std,
@@ -129,15 +173,25 @@ class DrivAerNetVolumeDataset:
     def sample(self, case_name: str, rng: np.random.Generator, **kwargs):
         del kwargs
         pool = self._load_rows(case_name)
-        indices = sample_row_indices_np(pool.shape[0], self.num_query_points, rng)
-        rows = np.asarray(pool[indices]).astype(np.float32, copy=False)
-        wall_distance_rows = None
+        wall_distance_pool = None
         if self._needs_wall_distance():
-            wall_distance_pool = self._load_wall_distance_rows(case_name)
-            if wall_distance_pool.shape[0] != pool.shape[0]:
-                raise ValueError(
-                    f"DrivAerNet++ wall-distance cache row count mismatch for {case_name}: "
-                    f"{wall_distance_pool.shape[0]} != {pool.shape[0]}."
-                )
-            wall_distance_rows = np.asarray(wall_distance_pool[indices]).astype(np.float32, copy=False)
-        return rows[:, :3].astype(np.float32, copy=True), self._pack(rows, self.volume_target_list, wall_distance_rows)
+            has_distance = "wall_distance" in names if (names := pool.dtype.names) else pool.shape[1] >= 8
+            if has_distance:
+                wall_distance_pool = self._raw_field(pool, "wall_distance")
+            elif self.allow_legacy_flat_cache and self.cache_profile is None and not pool.dtype.names:
+                wall_distance_pool = self._load_wall_distance_rows(case_name)
+            else:
+                raise ValueError("DrivAerNet volume cache lacks required field 'wall_distance'")
+            if len(wall_distance_pool) != len(pool):
+                raise ValueError(f"{case_name}: wall-distance cache row count differs from volume cache")
+        if getattr(self, "validation_cp_min", None) is not None:
+            cp = self._raw_field(pool, "p")[:, 0] / (0.5 * self.u_ref ** 2)
+            # Filter paired fields together, including any explicit legacy sidecar.
+            keep = pressure_valid_rows(self, np.arange(len(pool)), cp)
+            pool = pool[keep]
+            if wall_distance_pool is not None:
+                wall_distance_pool = wall_distance_pool[keep]
+        indices = sample_row_indices_np(len(pool), self.num_query_points, rng)
+        rows = pool[indices]
+        wall_distance_rows = None if wall_distance_pool is None else wall_distance_pool[indices]
+        return self._raw_field(rows, "xyz").copy(), self._pack(rows, self.volume_target_list, wall_distance_rows)

@@ -9,7 +9,12 @@ __pycache__/
 # Local agent/editor state
 .codex
 .agents/
-AGENTS.md
+
+# Local documentation, papers, tests, and generated visualizations
+/docs/
+/paper/
+/tests/
+/visualization/
 
 # Runtime outputs
 demo/

@@ -1,0 +1,23 @@
+CONFIG = {
+    "name": "FullAircraft",
+    "kwargs": {
+        "use_surface": True,
+        "use_volume": False,
+        "num_surface_points": 8192,
+        "num_surface_query_points": 2048,
+        "num_query_points": 0,
+        "surface_input_list": ["xyz", "normal", "area"],
+        "surface_target_list": ["p"],
+        "volume_target_list": [],
+        "coefficient_target_list": ["CX", "CZ", "MY", "CD", "CL"],
+        "surface_sampling": "random",
+        "normalization": "physical",
+        "condition_representation": "canonical",
+        "rotate_geometry_by_aoa": True,
+        "split": "all",
+        "val_ratio": 0.2,
+        "skip_incomplete": True,
+        "repeat": 1,
+        "route": 1,
+    },
+}

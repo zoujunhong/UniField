@@ -1,0 +1,143 @@
+{
+  "dataset": "RocketCFD",
+  "source_manifest": "/data/home/zdhs0017/OpenFOAM/Cases/AutoCFD/datasets/rocket_cp_generalization_v1_draft/manifests/processed_cases.csv",
+  "excluded_geometries": {
+    "g020": "quarantined: incorrect canonical orientation and unreliable CFD fields",
+    "g050": "quarantined: multi-body geometry/orientation issue and divergent CFD fields"
+  },
+  "quality_policy_default": "all_completed",
+  "counts": {
+    "all_completed": {
+      "train": 1938,
+      "aoa_interpolation": 360,
+      "aoa_extrapolation": 180,
+      "geometry_generalization": 878,
+      "ood_geometry": 330
+    },
+    "usable": {
+      "train": 1267,
+      "aoa_interpolation": 223,
+      "aoa_extrapolation": 136,
+      "geometry_generalization": 576,
+      "ood_geometry": 237
+    },
+    "converged_only": {
+      "train": 362,
+      "aoa_interpolation": 63,
+      "aoa_extrapolation": 38,
+      "geometry_generalization": 146,
+      "ood_geometry": 58
+    }
+  },
+  "geometry_ids": {
+    "train": [
+      "g001",
+      "g002",
+      "g003",
+      "g004",
+      "g005",
+      "g006",
+      "g007",
+      "g008",
+      "g009",
+      "g010",
+      "g011",
+      "g012",
+      "g013",
+      "g014",
+      "g015",
+      "g016",
+      "g017",
+      "g018",
+      "g019",
+      "g021",
+      "g022",
+      "g023",
+      "g024",
+      "g025",
+      "g026",
+      "g027",
+      "g028",
+      "g029",
+      "g030",
+      "g031",
+      "g032",
+      "g033",
+      "g034",
+      "g035",
+      "g036",
+      "g037",
+      "g038",
+      "g039",
+      "g040"
+    ],
+    "aoa_interpolation": [
+      "g003",
+      "g005",
+      "g013",
+      "g021",
+      "g026",
+      "g028",
+      "g031",
+      "g037",
+      "g040"
+    ],
+    "aoa_extrapolation": [
+      "g003",
+      "g005",
+      "g013",
+      "g021",
+      "g026",
+      "g028",
+      "g031",
+      "g037",
+      "g040"
+    ],
+    "geometry_generalization": [
+      "g041",
+      "g042",
+      "g043",
+      "g044",
+      "g045",
+      "g046",
+      "g047",
+      "g048"
+    ],
+    "ood_geometry": [
+      "g049",
+      "g051",
+      "g052"
+    ]
+  },
+  "angles": {
+    "train": [
+      -8,
+      -4,
+      0,
+      4,
+      8
+    ],
+    "aoa_interpolation": [
+      -6,
+      -2,
+      2,
+      6
+    ],
+    "aoa_extrapolation": [
+      -10,
+      10
+    ]
+  },
+  "mach": [
+    0.2,
+    0.3,
+    0.5,
+    0.8,
+    1.0,
+    1.2,
+    1.5,
+    2.0,
+    3.0,
+    5.0
+  ]
+}

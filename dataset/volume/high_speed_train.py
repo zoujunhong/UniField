@@ -15,6 +15,7 @@ from dataset.cache.high_speed_train import (
 from dataset.utils.load import parse_high_speed_case_cond
 from dataset.utils.normalization import normalize_high_speed_field
 from dataset.utils.sampling import sample_rows_np
+from dataset.validation import pressure_valid_rows
 
 
 class HighSpeedTrainVolumeDataset:
@@ -59,6 +60,11 @@ class HighSpeedTrainVolumeDataset:
             )
         return np.load(path, mmap_mode=self.mmap_mode).astype(np.float32, copy=False)
 
+    def coordinate_reference(self, case_name: str) -> np.ndarray:
+        """Fallback reference for volume-only configurations without a surface cache."""
+
+        return self._load_rows(case_name)[:, :3].astype(np.float32, copy=True)
+
     def _field(self, rows: np.ndarray, name: str, case_name: str) -> np.ndarray:
         cond, speed = parse_high_speed_case_cond(case_name)
         del cond
@@ -97,6 +103,7 @@ class HighSpeedTrainVolumeDataset:
     def sample(self, case_name: str, rng: np.random.Generator, **kwargs):
         del kwargs
         pool = self._load_rows(case_name)
+        pool = pressure_valid_rows(self, pool, pool[:, 3] / (0.5 * parse_high_speed_case_cond(case_name)[1] ** 2))
         rows = sample_rows_np(pool, self.num_query_points, rng)
         query = rows[:, :3].astype(np.float32, copy=True)
         if self.query_surface_distance:

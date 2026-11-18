@@ -13,10 +13,10 @@ from dataset import build_dataset
 from dataset.utils.load import high_speed_type_dir
 from dataset.utils.sampling import rng_for_index
 from model import build_model
-from test import denormalize
-from train import load_main_config
+from utils.field_metrics import denormalize
+from utils.config import load_main_config, configure_training_run
 from utils.checkpoint import load_model_weights, resolve_eval_checkpoint
-from utils.config import dataset_config_for_phase
+from utils.config import apply_runtime_seed, dataset_config_for_phase
 from utils.task import build_query, coefficient_prediction, move_batch_to_device, prediction_field, query_prediction, target_field
 from utils.visualization import plot_volume_slice_panels, robust_limits, save_prediction_npz, scatter_scalar, scatter_volume_slice, to_numpy
 
@@ -191,7 +191,7 @@ def _predict_volume_fields(
     for item in _volume_eval_items(task_config):
         field = item["field"]
         pred_field = prediction_field(pred, "volume", field, {"losses": [item]}, surface_count=0)
-        fields[field] = to_numpy(denormalize(pred_field, field, task_config, batch)[0])
+        fields[field] = to_numpy(denormalize(pred_field, field, task_config, batch, 'volume')[0])
     return fields
 
 
@@ -374,6 +374,8 @@ def _run_high_speed_vtk_volume_visualization(
 
 @torch.no_grad()
 def run_visualization(config: dict) -> None:
+    if config.get('migration', {}).get('evaluation_requires_legacy_source'):
+        raise ValueError('This historical checkpoint requires its archived exact model/evaluation source; the current model configuration cannot reproduce it.')
     runtime_config = config["runtime"]
     vis_config = config["visualization"]
     task_config = config["task"]
@@ -398,7 +400,7 @@ def run_visualization(config: dict) -> None:
     model = build_model(config["model"]).to(device).float().eval()
     checkpoint = resolve_eval_checkpoint(config, "visualization")
     if checkpoint:
-        load_model_weights(model, checkpoint, strict=True)
+        load_model_weights(model, checkpoint, strict=True, trusted_legacy=bool(vis_config.get('trust_legacy_checkpoint', config.get('test', {}).get('trust_legacy_checkpoint', False))))
         print(f"checkpoint loaded: {checkpoint}", flush=True)
     else:
         print("no checkpoint configured; running random-init visualization smoke", flush=True)
@@ -465,8 +467,8 @@ def run_visualization(config: dict) -> None:
         if domain == "surface":
             xyz = to_numpy(batch["surface_query"][0])
             tgt = target_field(batch["surface_target"], task_config["surface_target_list"], field)
-            pred_np = to_numpy(denormalize(pred_field, field, task_config, batch)[0])
-            tgt_np = to_numpy(denormalize(tgt, field, task_config, batch)[0])
+            pred_np = to_numpy(denormalize(pred_field, field, task_config, batch, domain)[0])
+            tgt_np = to_numpy(denormalize(tgt, field, task_config, batch, domain)[0])
             if xyz.shape[0] > max_points:
                 xyz = xyz[:max_points]
                 pred_np = pred_np[:max_points]
@@ -484,8 +486,8 @@ def run_visualization(config: dict) -> None:
         elif domain == "volume":
             xyz = to_numpy(batch["volume_query"][0])
             tgt = target_field(batch["volume_target"], task_config["volume_target_list"], field)
-            pred_np = to_numpy(denormalize(pred_field, field, task_config, batch)[0])
-            tgt_np = to_numpy(denormalize(tgt, field, task_config, batch)[0])
+            pred_np = to_numpy(denormalize(pred_field, field, task_config, batch, domain)[0])
+            tgt_np = to_numpy(denormalize(tgt, field, task_config, batch, domain)[0])
             if xyz.shape[0] > max_points:
                 xyz = xyz[:max_points]
                 pred_np = pred_np[:max_points]
@@ -514,8 +516,11 @@ def run_visualization(config: dict) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(description="Config-driven UniField visualization.")
     parser.add_argument("--config", required=True, help="Path to a Python config file exporting CONFIG.")
+    parser.add_argument("--seed", type=int, default=None, help="Override deterministic visualization seed and expand {seed} paths.")
     args = parser.parse_args()
-    run_visualization(load_main_config(args.config))
+    config = configure_training_run(load_main_config(args.config), for_training=False)
+    apply_runtime_seed(config, args.seed)
+    run_visualization(config)
 
 
 if __name__ == "__main__":

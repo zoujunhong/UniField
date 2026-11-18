@@ -14,6 +14,7 @@ from dataset.cache.high_speed_train import (
     DEFAULT_VOLUME_CACHE_POINTS,
     HIGH_SPEED_TRAIN_GEOMETRY_COUNTS,
     HIGH_SPEED_TRAIN_ROOT,
+    HIGH_SPEED_TRAIN_CACHE_ROOT,
     cache_path,
     cache_numpy_dtype,
     high_speed_case_sort_key,
@@ -24,7 +25,19 @@ from dataset.cache.high_speed_train import (
 )
 from dataset.surface.base import EmptySurfaceDataset
 from dataset.surface.high_speed_train import HighSpeedTrainSurfaceDataset
-from dataset.utils.load import ensure_xyz_prefix, high_speed_type_dir, list_high_speed_cases, parse_high_speed_case_cond
+from dataset.utils.coordinate_frame import (
+    CanonicalCoordinateFrame,
+    rotate_packed_vector_targets,
+    transform_packed_surface_input,
+    wind_heading,
+)
+from dataset.utils.load import (
+    ensure_xyz_prefix,
+    high_speed_free_stream,
+    high_speed_type_dir,
+    list_high_speed_cases,
+    parse_high_speed_case_cond,
+)
 from dataset.utils.sampling import filter_names, rng_for_index
 from dataset.volume.base import EmptyVolumeDataset
 from dataset.volume.high_speed_train import HighSpeedTrainVolumeDataset
@@ -54,14 +67,57 @@ def validate_high_speed_coefficient_fields(fields: list[str] | tuple[str, ...]) 
         raise KeyError(f"Unsupported HighSpeedTrain coefficient fields: {unsupported}")
 
 
+def high_speed_case_type_path(root_dir: str | Path, train_type: str) -> Path:
+    try:
+        return high_speed_type_dir(root_dir, train_type)
+    except FileNotFoundError:
+        return Path(root_dir) / normalized_train_type(train_type)
+
+
+def discover_high_speed_cached_cases(root_dir: str | Path, train_type: str, cache_root: str | Path) -> list[Path]:
+    canonical = Path(cache_root) / "cases"
+    if Path(root_dir) == Path(HIGH_SPEED_TRAIN_ROOT) and canonical.is_dir():
+        cases = []
+        manifest = Path(cache_root) / "case_manifest.json"
+        if manifest.is_file():
+            records = json.loads(manifest.read_text())["cases"]
+        else:
+            records = []
+            for folder in sorted(canonical.glob("*")):
+                if not folder.is_dir():
+                    continue
+                path = folder / "metadata.json"
+                if not path.is_file():
+                    raise FileNotFoundError(f"Canonical cache metadata is missing: {path}")
+                records.append(json.loads(path.read_text()))
+        for metadata in records:
+            if metadata.get("cache_only", False):
+                continue
+            if normalized_train_type(metadata.get("train_type", "")) == normalized_train_type(train_type):
+                folder = canonical / metadata["case"]
+                if not (folder / "metadata.json").is_file():
+                    raise FileNotFoundError(f"Canonical cache metadata is missing: {folder}")
+                for kind in ("surface", "volume"):
+                    if kind in metadata and not (folder / f"{kind}.npy").is_file():
+                        raise FileNotFoundError(f"Incomplete canonical cache case: {folder}/{kind}.npy")
+                cases.append(high_speed_case_type_path(root_dir, train_type) / folder.name)
+        if cases:
+            return cases
+    return list_high_speed_cases(root_dir, train_type)
+
+
 def read_high_speed_coefficients(case_dir: str | Path, fields: list[str] | tuple[str, ...]) -> np.ndarray:
     fields = list(fields or [])
     if not fields:
         return np.zeros((0,), dtype=np.float32)
     validate_high_speed_coefficient_fields(fields)
-    path = Path(case_dir) / "force_summary.json"
-    with open(path, "r", encoding="utf-8") as f:
-        data = json.load(f)
+    canonical = Path(HIGH_SPEED_TRAIN_CACHE_ROOT) / "cases" / Path(case_dir).name / "metadata.json"
+    data = json.loads(canonical.read_text()) if canonical.is_file() else {}
+    path = canonical
+    if not all(field in data.get("coefficients", {}) for field in fields):
+        path = Path(case_dir) / "force_summary.json"
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
     coefficients = data.get("coefficients", {})
     values = []
     for field in fields:
@@ -167,7 +223,7 @@ def _complete_high_speed_cache_case(
         if not valid_npy_cache(path, min_cols=min_cols, dtype=cache_numpy_dtype(cache_dtype)):
             return False
     if coefficient_target_list:
-        type_dir = high_speed_type_dir(root_dir, train_type)
+        type_dir = high_speed_case_type_path(root_dir, train_type)
         if not complete_high_speed_coefficients(type_dir / case_name, coefficient_target_list):
             return False
     return True
@@ -202,6 +258,9 @@ class HighSpeedTrainDatasetBase(Dataset):
         normalization: str = "physical",
         standard_stats=None,
         center_x: bool = True,
+        center_y: bool = True,
+        ground_z: bool = True,
+        align_freestream: bool = True,
         route: int = 0,
         mmap: bool = False,
         deterministic: bool = False,
@@ -219,11 +278,14 @@ class HighSpeedTrainDatasetBase(Dataset):
 
         self.root_dir = root_dir
         self.train_type = normalized_train_type(train_type)
-        self.cache_root = cache_root or os.path.join(root_dir, "cache")
+        self.cache_root = cache_root or HIGH_SPEED_TRAIN_CACHE_ROOT
         self.use_surface = bool(use_surface)
         self.use_volume = bool(use_volume)
         self.repeat = int(repeat)
         self.center_x = bool(center_x)
+        self.center_y = bool(center_y)
+        self.ground_z = bool(ground_z)
+        self.align_freestream = bool(align_freestream)
         self.route = int(route)
         self.skip_incomplete = bool(skip_incomplete)
         self.allow_empty = bool(allow_empty)
@@ -241,6 +303,15 @@ class HighSpeedTrainDatasetBase(Dataset):
         self.num_surface_query_points = self.num_surface_points if num_surface_query_points is None else int(num_surface_query_points)
         self.num_query_points = int(num_query_points)
         self.cache_dtype = normalized_cache_dtype(cache_dtype)
+        if self.align_freestream and normalization == "standard" and "U" in {
+            *self.surface_input_list,
+            *self.surface_target_list,
+            *self.volume_target_list,
+        }:
+            raise ValueError(
+                "align_freestream=True requires physical or none normalization for U targets; "
+                "rotating independently standardized velocity components is not physically meaningful."
+            )
         self.interface_signature = (
             tuple(self.surface_input_list),
             tuple(self.surface_target_list),
@@ -249,11 +320,10 @@ class HighSpeedTrainDatasetBase(Dataset):
             self.num_surface_points,
             self.num_surface_query_points,
             self.num_query_points,
-            self.query_sdf_clip,
-            self.surface_distance_target_transform,
+            4 if self.query_sdf_clip is not None else 3,
         )
 
-        case_dirs = list_high_speed_cases(root_dir, self.train_type)
+        case_dirs = discover_high_speed_cached_cases(root_dir, self.train_type, self.cache_root)
         names = filter_names([path.name for path in case_dirs], ids_file)
         names = _split_high_speed_names_by_geometry(
             names,
@@ -357,6 +427,20 @@ class HighSpeedTrainDatasetBase(Dataset):
         surface_sdf = np.zeros((surface_query.shape[0],), dtype=np.float32)
         return _append_feature_column(surface_query, surface_sdf)
 
+    def _coordinate_frame(self, case_name: str) -> CanonicalCoordinateFrame:
+        free_stream = high_speed_free_stream(case_name)
+        heading = wind_heading(float(free_stream[0]), float(free_stream[1])) if self.align_freestream else 0.0
+        if self.use_surface:
+            reference = self.surface.coordinate_reference(case_name)
+        else:
+            reference = self.volume.coordinate_reference(case_name)
+        frame = CanonicalCoordinateFrame.from_surface_xyz(reference, heading)
+        return CanonicalCoordinateFrame(
+            wind_heading_rad=frame.wind_heading_rad,
+            xy_center=(frame.xy_center[0] if self.center_x else 0.0, frame.xy_center[1] if self.center_y else 0.0),
+            z_min=frame.z_min if self.ground_z else 0.0,
+        )
+
     def __getitem__(self, idx: int):
         case_name = self.case_names[idx % len(self.case_names)]
         rng = rng_for_index(self.seed, idx, self.deterministic)
@@ -364,20 +448,16 @@ class HighSpeedTrainDatasetBase(Dataset):
 
         surface_input, surface_query, surface_target = self.surface.sample(case_name, rng)
         volume_query, volume_target = self.volume.sample(case_name, rng)
-        type_dir = high_speed_type_dir(self.root_dir, self.train_type)
+        type_dir = high_speed_case_type_path(self.root_dir, self.train_type)
         coefficient_target = read_high_speed_coefficients(type_dir / case_name, self.coefficient_target_list)
         surface_query = self._append_surface_query_sdf(surface_query)
-
-        if self.center_x and surface_input.shape[0] > 0:
-            x_center = 0.5 * (surface_input[:, 0].max() + surface_input[:, 0].min())
-            surface_input = surface_input.copy()
-            surface_input[:, 0] -= x_center
-            if surface_query.shape[0] > 0:
-                surface_query = surface_query.copy()
-                surface_query[:, 0] -= x_center
-            if volume_query.shape[0] > 0:
-                volume_query = volume_query.copy()
-                volume_query[:, 0] -= x_center
+        frame = self._coordinate_frame(case_name)
+        surface_input = transform_packed_surface_input(surface_input, self.surface_input_list, frame)
+        surface_input = rotate_packed_vector_targets(surface_input, self.surface_input_list, frame)
+        surface_query = frame.transform_xyz(surface_query)
+        surface_target = rotate_packed_vector_targets(surface_target, self.surface_target_list, frame)
+        volume_query = frame.transform_xyz(volume_query)
+        volume_target = rotate_packed_vector_targets(volume_target, self.volume_target_list, frame)
 
         return (
             torch.from_numpy(surface_input).float(),

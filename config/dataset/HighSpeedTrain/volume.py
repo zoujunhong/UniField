@@ -1,0 +1,25 @@
+CONFIG = {
+    "name": ["CRH450", "Maglev"],
+    "drop_empty": True,
+    "common_kwargs": {
+        "use_surface": True,
+        "use_volume": True,
+        "num_surface_points": 8192,
+        "num_surface_query_points": 0,
+        "num_query_points": 8192,
+        "surface_input_list": ["xyz", "normal", "area"],
+        "surface_target_list": [],
+        "volume_target_list": ["U", "p", "k", "omega", "nut"],
+        "coefficient_target_list": [],
+        "surface_sampling": "random",
+        "normalization": "physical",
+        "cache_dtype": "fp32",
+        "allow_empty": True,
+        "repeat": 10,
+        "route": 0,
+    },
+    "kwargs": {
+        "CRH450": {"route": 0},
+        "Maglev": {"route": 0},
+    },
+}

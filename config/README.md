@@ -1,331 +1,46 @@
-# Config 使用说明
+# 配置规范
 
-主线入口只接受一个 config 地址：
-
-```bash
-python train.py --config config/experiment/drivaernet_surfaceP_volumeU.py
-python test.py --config config/experiment/drivaernet_surfaceP_volumeU.py
-python visualization.py --config config/experiment/drivaernet_surfaceP_volumeU.py
-```
-
-所有 config 文件都是 Python 文件，并且只需要导出一个 `CONFIG` 字典：
-
-```python
-CONFIG = {...}
-```
-
-命令行参数不会覆盖 config 内容；新实验建议复制一个 config 文件后修改。
-
-## 编写约定
-
-- 新建或整理 config 时，直接写完整 `CONFIG` 字典。
-- 不要通过 `from ... import CONFIG as BASE_CONFIG`、`deepcopy(BASE_CONFIG)` 等方式派生 config。
-- 如果两个实验只差少量字段，也优先复制完整 config 后显式修改，保证单个 config 文件能独立说明训练内容。
-
-## 目录规则
+所有训练通过 `python train.py --config <文件.py>` 启动；文件导出 `CONFIG` 字典。主配置使用 `config/defaults.py` 的工厂组合已登记的数据集、模型和统一训练协议。
 
 ```text
-config/
-  dataset/<DatasetName>/<Option>.py
-  model/<ModelName>/<Size>.py
-  experiment/<ExperimentName>.py
+config/dataset/<数据集>/surface.py 或 volume.py（联合任务可有 surface_volume.py）
+config/model/<模型族>/<规模>.py
+config/experiment/<数据集>_<模型>_<规模>_Surface<量或X>_Volume<量或X>.py
 ```
 
-`experiment` config 里不写完整路径，而是写名称：
+物理量代码为 P、U、Normal、K、Omega、Nut、Distance；顺序与 task 的字段顺序一致。规模由模型结构决定，学习率、GPU数量、训练比例和损失类型不写入主名。
+
+## 派生实验
+
+每个变体放 `log/<主名>/<副名>/config.py`。默认副名 `default`，仅导入主配置；其他副名由 `调整项_目标` 组成。必须先 deepcopy，避免修改导入对象。
 
 ```python
-"dataset": "DrivAerNet",
-"dataset_option": "surface_volume",
-"model": "UniField_cross_attention",
-"model_size": "Medium",
+from copy import deepcopy
+from config.experiment.DrivAerNet_Transolver3_Medium_SurfaceX_VolumePU import CONFIG as BASE
+CONFIG = deepcopy(BASE)
+CONFIG['experiment'].update(variant='Loss_RelL2_GPU_3', description='损失改为相对L2，使用3张GPU。')
+CONFIG['runtime']['distributed']['gpu_num'] = 3
+for loss in CONFIG['task']['losses']:
+    loss['loss_type'] = 'relative_l2'
 ```
 
-加载器会自动解析为：
+同目录 README.md 只写相对默认的改动。启动器会保存解析配置、来源、train.log，并将 config.py 和 README.md 备份至对应 checkpoint 目录。历史迁移配置另保留 legacy_config、来源路径及缺失状态说明。
 
-```text
-config/dataset/DrivAerNet/surface_volume.py
-config/model/UniField_cross_attention/Medium.py
-```
+## 关键字段
 
-## Dataset Config
+- `experiment.name/variant/description`：主名、副名和改动说明。
+- `dataset/dataset_option/dataset_kwargs`：数据源及公共参数；`train/validation/test.dataset_kwargs` 为阶段覆盖。
+- `task.surface_input_list/surface_target_list/volume_target_list`：输入和监督量；`task.losses` 中设置 domain、field、pred_slice、weight、loss_type。
+- `runtime.distributed.gpu_num`：GPU数；`runtime.seed/amp/amp_dtype/compile`：运行设置。
+- `train.total_steps`：优化器更新预算；`train.validation.interval` 和 `checkpoint_interval_steps` 均以步计数。
+- `train.optimizer/lr/weight_decay/warmup_iters/final_lr_ratio`：优化配置；`train.ema={'enabled': True, 'decay': 0.9999}`。
+- `train.resume_checkpoint`：完整状态接续；`train.checkpoint`：权重初始化。二者不能混淆。
+- `train.auto_test`：正常完成后运行测试；`test.checkpoint` 可显式选择权重。
+- `test.query_sets`：通用测试的随机采样组数，默认10；DSAPT 使用原始十套固定索引协议。
+- `task.denormalize.<domain>.<field>`：按表面/体场分别指定反归一化；同名压力场可以有不同 mean/std。未提供变换时只报告模型空间指标。
 
-单数据集：
+验证始终完整划分、固定单组10000 query/监督域、物理Cp<-10整行过滤。历史特殊训练设置写在副配置中；训练阶段的原过滤规则不应冒充验证或测试规则。若数据集历史上只有 train/val，不能把 val 宣称为独立 test，应关闭自动测试并在配置中记录。
 
-```python
-CONFIG = {
-    "name": "DrivAerNet",
-    "kwargs": {...},
-}
-```
+常规测试使用缓存；显式全点测试直接读取原始 VTK，由相应评估程序分块预测并记录全点协议。全点结果、历史固定点结果和默认随机 query 结果分别标记，不能互换。当前通用 `test.py` 是缓存采样入口，不应仅把 query 数量调大就称为原始全点测试。
 
-多数据集合并：
-
-```python
-CONFIG = {
-    "name": ["CRH450", "Maglev"],
-    "common_kwargs": {...},
-    "kwargs": {
-        "CRH450": {"route": 1},
-        "Maglev": {"route": 2},
-    },
-}
-```
-
-常用字段：
-
-- `name`：必须和 `dataset/<Name>.py` 同名。
-- `use_surface` / `use_volume`：是否启用表面/体场分支。
-- `num_surface_points`：输入 encoder 的表面点数量。
-- `num_surface_query_points`：计算表面 target loss 的查询点数量。
-- `num_query_points`：体场查询点数量。
-- `surface_input_list`：encoder 输入通道，默认常用 `["xyz", "normal", "area"]`。
-- `surface_target_list`：表面监督字段，例如 `["p"]`。
-- `volume_target_list`：体场监督字段，例如 `["U"]`。
-- `normalization`：`"standard"`、`"physical"` 或 `"none"`。
-- `ids_file` / `split`：数据划分；建议写在 experiment config 的阶段级 `dataset_kwargs` 中，而不是写死在 dataset option config 中。
-- `route`：多 route 模型的分支标识。
-- `repeat`：重复采样次数。
-
-合并数据集时，`surface_input_list`、target list 和采样点数必须一致，否则会在构建阶段报错。
-
-## Model Config
-
-```python
-CONFIG = {
-    "encoder_name": "UniFieldEncoder",
-    "encoder_kwargs": {...},
-    "decoder_name": "CrossAttentionDecoder",
-    "decoder_kwargs": {...},
-    "default_query_chunk_size": 50000,
-}
-```
-
-常用字段：
-
-- `encoder_name`：必须由 `model/Encoder/__init__.py` 导出，例如 `"UniFieldEncoder"`。
-- `encoder_kwargs`：encoder 构造参数，例如 `embed_dims`、`depths`、`num_heads`、`window_sizes`、`down_ratios`、`cond_dim`、`num_routes`、`use_flow_attention`、`use_flow_ffn`。
-- `decoder_name`：必须由 `model/Decoder/__init__.py` 导出，例如 `"CrossAttentionDecoder"`、`"AnchorDecoder"`、`"MLPQueryDecoder"`、`"SelfAttentionDecoder"`。
-- `decoder_kwargs`：decoder 构造参数，例如 `out_channels`、`query_in_dim`、`query_dim`、`depth` 或 `query_depth`、`num_heads` 或 `query_heads`、`num_routes`、`use_flow_attention`、`use_flow_ffn`。
-- `decoder_kwargs.memory_dim`：通常不用写，`model.build_model` 会从 `encoder_kwargs["embed_dims"][-1]` 自动推断；只有 decoder 使用非 encoder 最后一层 memory 时才需要手动指定。
-- `default_query_chunk_size`：测试/可视化时 chunk 推理默认点数。
-
-模型预设目录名，例如 `config/model/UniField_cross_attention/Medium.py`，只是实验预设名称。它不再要求 `model/UniField_cross_attention.py` 存在；实际完整模型统一由 `QueryUniField(encoder, decoder)` 拼接。
-
-AdaField / UniFieldV1 / UniFieldV2 旧模型也使用同一格式：
-
-```python
-CONFIG = {
-    "encoder_name": "AdaFieldEncoder",
-    "encoder_kwargs": {
-        "depth": (4, 4, 6, 12, 8),
-        "channels": (64, 128, 256, 512, 1024),
-        "num_points": (1024, 256, 64, 16),
-        "cond_dim": 2,
-    },
-    "decoder_name": "SurfacePressureDecoder",
-    "decoder_kwargs": {"out_channels": 1},
-}
-```
-
-这类 legacy surface 模型的 `memory_dim` 会从 `encoder_kwargs["channels"][0]` 自动推断。
-UniFieldV2 使用 `embed_dims`，其中 `Large.py` 对应旧 `demo_DrivAerNet.py` 中的 `UniField_1210_2` checkpoint 配置。
-
-模型规模文件名固定为 `Small.py`、`Medium.py`、`Large.py`。
-
-## Experiment Config
-
-Experiment config 负责组合 dataset、model、task、runtime、train、test、visualization。
-
-### 顶层选择
-
-```python
-"dataset": "DrivAerNet",
-"dataset_option": "surface_volume",
-"model": "UniField_cross_attention",
-"model_size": "Medium",
-```
-
-### 阶段级 dataset_kwargs
-
-`train.py`、`test.py` 和 `visualization.py` 会分别读取 `train.dataset_kwargs`、`test.dataset_kwargs` 和 `visualization.dataset_kwargs`，并覆盖到 dataset config 的 `kwargs` 上。这样同一个 dataset option 可以在不同阶段使用不同划分。
-
-DrivAerNet++ 示例：
-
-```python
-"train": {
-    "dataset_kwargs": {
-        "ids_file": "/data/group/project1/CFD/DrivAerNet++/train_design_ids.txt",
-    },
-    ...
-},
-"test": {
-    "dataset_kwargs": {
-        "ids_file": "/data/group/project1/CFD/DrivAerNet++/val_design_ids.txt",
-    },
-    ...
-},
-"visualization": {
-    "dataset_kwargs": {
-        "ids_file": "/data/group/project1/CFD/DrivAerNet++/val_design_ids.txt",
-    },
-    ...
-},
-```
-
-高铁数据集示例：
-
-```python
-"train": {"dataset_kwargs": {"split": "train"}, ...},
-"test": {"dataset_kwargs": {"split": "test"}, ...},
-"visualization": {"dataset_kwargs": {"split": "test"}, ...},
-```
-
-CRH450 / Maglev 按 case 名中的 `geo_<编号>` 切分：CRH450 的 `geo_1`-`geo_18` 训练、`geo_19`-`geo_20` 测试和可视化；Maglev 的 `geo_1`-`geo_27` 训练、`geo_28`-`geo_30` 测试和可视化。高铁 dataset 默认会跳过当前阶段缺失或尚未写完整 cache 的 case。
-
-高铁实验 config 命名从现在起统一使用短前缀 `HighSpeedTrain_...`，例如：
-
-```text
-config/experiment/HighSpeedTrain_TripNet_volumeAll.py
-config/experiment/HighSpeedTrain_UniFieldCrossAttention_volumeRANS_MAERMSE.py
-config/experiment/HighSpeedTrain_Gaussian3D_MortonShift_volumeAll.py
-```
-
-旧的 `HighSpeedTrain_CRH450_Maglev_...` config 已清理；如需复现实验，请使用短前缀入口。
-
-TripNet 复现实验入口是 `config/experiment/HighSpeedTrain_TripNet_volumeAll.py`。它使用 `dataset_option="tripnet_volume"`，只读 per-case FP32 triplane cache 作为几何输入，不使用 normal/area；训练前需先构建：
-
-```text
-cache/<TrainType>/triplane_32x128x128_fp32/<case_name>.npz
-```
-
-### task
-
-```python
-"task": {
-    "surface_input_list": ["xyz", "normal", "area"],
-    "surface_target_list": ["p"],
-    "volume_target_list": ["U"],
-    "query_type_channel": True,
-    "losses": [
-        {"domain": "surface", "field": "p", "pred_slice": (3, 4), "weight": 1.0},
-        {"domain": "volume", "field": "U", "pred_slice": (0, 3), "weight": 1.0},
-    ],
-    "eval_fields": [...],
-    "denormalize": {...},
-}
-```
-
-- `surface_input_list`：必须和 dataset config 一致。
-- `surface_target_list` / `volume_target_list`：用于从 target tensor 中按字段取真值。
-- `query_type_channel=True`：表面 query 拼 `[x,y,z,0]`，体场 query 拼 `[x,y,z,1]`。
-- `losses`：
-  - `domain`：`"surface"` 或 `"volume"`。
-  - `field`：target 字段名，例如 `"p"`、`"U"`。
-  - `pred_slice`：模型输出中的通道切片，左闭右开。例如 `(3, 4)` 表示第 4 个通道。
-  - `weight`：该 loss 权重。
-- `eval_fields`：测试和可视化要输出指标/图片的字段；格式和 `losses` 相同，可不写 `weight`。
-
-### denormalize
-
-`denormalize` 只用于 `test.py` 和 `visualization.py`，把模型空间的预测/target 转回 raw-space 做指标和画图。
-
-如果 dataset 使用 `normalization="standard"`，写 `type="affine"`：
-
-```python
-"denormalize": {
-    "p": {"type": "affine", "mean": [-94.5], "std": [117.25]},
-    "U": {
-        "type": "affine",
-        "mean": [21.725932072168813, -0.23861807530826643, 0.6522818340397506],
-        "std": [12.373392759706936, 3.8865940380244175, 3.9738297581062536],
-    },
-}
-```
-
-含义是：
-
-```python
-raw = normalized * std + mean
-```
-
-如果 DrivAerNet 使用 `normalization="physical"`，写：
-
-```python
-"denormalize": {
-    "p": {"type": "physical", "dataset": "DrivAerNet", "u_ref": 30.0},
-    "U": {"type": "physical", "dataset": "DrivAerNet", "u_ref": 30.0},
-}
-```
-
-对应 dataset 中的反变换：
-
-```python
-p_raw = p_norm * (0.5 * u_ref ** 2)
-U_raw = U_norm * abs(u_ref) + [u_ref, 0, 0]
-```
-
-如果 CRH450/Maglev 使用 `normalization="physical"`，写：
-
-```python
-"denormalize": {
-    "p": {"type": "physical", "dataset": "HighSpeedTrain"},
-    "U": {"type": "physical", "dataset": "HighSpeedTrain"},
-    "k": {"type": "physical", "dataset": "HighSpeedTrain"},
-    "omega": {"type": "physical", "dataset": "HighSpeedTrain"},
-    "nut": {"type": "physical", "dataset": "HighSpeedTrain"},
-}
-```
-
-它会从 batch 的 `cond=[Ux/100, Uy/20]` 反推出：
-
-```python
-free_stream = [cond0 * 100, cond1 * 20, 0]
-speed = norm(free_stream)
-p_raw = p_norm * (0.5 * speed ** 2)
-U_raw = U_norm * speed
-k_raw = k_norm * (0.01 * speed ** 2)
-omega_raw = omega_norm * (100.0 * speed)
-nut_raw = nut_norm * (0.01 * speed)
-```
-
-对应 dataset 归一化为上述公式的反向变换；`p` 默认不做 clip，如需裁剪可显式设置 `clamp_cp`。
-
-如果 dataset 使用 `normalization="none"`，可以省略该字段。
-
-### runtime
-
-- `seed`：随机种子。
-- `matmul_precision`：通常为 `"high"`。
-- `amp`：是否启用 fp16 autocast。
-- `compile`：是否启用 `torch.compile`。
-- `distributed.gpu_num`：GPU 数。
-- `distributed.start_gpu`：起始 GPU id。
-- `distributed.port`：DDP 端口。
-
-### train
-
-- `batch_size` / `workers`：DataLoader 配置。
-- `lr` / `weight_decay`：优化器配置。
-- `total_epoch` / `resume_epoch`：训练轮数与恢复位置。
-- `save_step`：checkpoint 保存间隔。
-- `clip_grad`：梯度裁剪阈值。
-- `final_lr_ratio` / `warmup_iters`：cosine scheduler 配置。
-- `saveroot`：checkpoint 输出目录。
-- `checkpoint`：可选预训练权重。
-- `route_map`：route 兼容加载时使用。
-- `dry_run_iters`：大于 0 时只跑指定 iteration，用于 smoke test。
-
-### test
-
-- `checkpoint`：测试权重。
-- `batch_size` / `workers`：DataLoader 配置。
-- `query_chunk_size`：chunk 推理点数。
-- `max_batches`：大于 0 时只测试前几个 batch。
-- `log_interval`：日志间隔。
-
-### visualization
-
-- `checkpoint`：可视化权重。
-- `query_chunk_size`：chunk 推理点数。
-- `max_points`：每张图最多绘制点数。
-- `output_dir`：为空时默认写到 `temp/<timestamp>_main_visualization/visualization/`。
+DSAPT 使用 `train.engine='dsapt'`；公共 train/runtime/loss 字段同步进入专用计算循环，稀疏结构与数据细节在 `CONFIG['dsapt']`。TripNet 依赖 triplane 输入，使用 HighSpeedTrain 的专用 dataset option。不同原生 baseline 的几何标准化由其适配器处理，不额外叠加其他模型的坐标变换。

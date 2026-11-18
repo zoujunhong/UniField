@@ -8,6 +8,7 @@ from dataset.cache.high_speed_train import DEFAULT_CACHE_DTYPE, DEFAULT_SURFACE_
 from dataset.utils.load import ensure_xyz_prefix, parse_high_speed_case_cond
 from dataset.utils.normalization import normalize_high_speed_field
 from dataset.utils.sampling import sample_rows_np
+from dataset.validation import pressure_valid_rows
 
 
 class HighSpeedTrainSurfaceDataset:
@@ -58,6 +59,11 @@ class HighSpeedTrainSurfaceDataset:
             )
         return np.load(path, mmap_mode=self.mmap_mode).astype(np.float32, copy=False)
 
+    def coordinate_reference(self, case_name: str) -> np.ndarray:
+        """Use the cached full surface pool, not a sampled encoder subset, for the bbox."""
+
+        return self._load_rows(case_name, np.random.default_rng(0))[:, :3].astype(np.float32, copy=True)
+
     def _field(self, rows: np.ndarray, name: str, case_name: str) -> np.ndarray:
         cond, speed = parse_high_speed_case_cond(case_name)
         del cond
@@ -98,10 +104,11 @@ class HighSpeedTrainSurfaceDataset:
         del kwargs
         pool = self._load_rows(case_name, rng)
         surface_rows = sample_rows_np(pool, self.num_surface_points, rng)
+        query_pool = pressure_valid_rows(self, pool, pool[:, 3] / (0.5 * parse_high_speed_case_cond(case_name)[1] ** 2))
         if self.num_surface_query_points is None:
             query_rows = surface_rows
         else:
-            query_rows = sample_rows_np(pool, self.num_surface_query_points, rng)
+            query_rows = sample_rows_np(query_pool, self.num_surface_query_points, rng)
         surface_input = self._pack(surface_rows, self.surface_input_list, case_name)
         surface_query = query_rows[:, :3].astype(np.float32, copy=True)
         surface_target = self._pack(query_rows, self.surface_target_list, case_name)

@@ -322,7 +322,7 @@ class FlowEncoderStage(nn.Module):
         return next_state, stage_output
 
 
-class UniFieldEncoder(nn.Module):
+class VolumeUniFieldEncoder(nn.Module):
     """
     Encoder-only UniField variant with unified flow-manifold attention.
 
@@ -373,7 +373,7 @@ class UniFieldEncoder(nn.Module):
         self.sort_bits = int(sort_bits)
         self.num_stages = len(embed_dims)
         if in_channels != 3:
-            raise ValueError("UniFieldEncoder v1 expects pos with exactly 3 coordinates.")
+            raise ValueError("VolumeUniFieldEncoder expects pos with exactly 3 coordinates.")
         if not (
             len(depths)
             == len(num_heads)
@@ -472,8 +472,15 @@ class UniFieldEncoder(nn.Module):
             if flow.shape != (pos.shape[0], 3):
                 raise ValueError("flow_vec must have shape (B, 3).")
         elif self.flow_from_cond and cond is not None and cond.shape[-1] >= 2:
-            zeros = cond.new_zeros(cond.shape[0], 1)
-            flow = torch.cat([cond[:, :2], zeros], dim=-1).to(device=pos.device, dtype=pos.dtype)
+            # New surface datasets may supply the complete body-frame velocity
+            # [Ux, Uy, Uz].  Preserve the historical two-channel convention by
+            # appending z=0 only when a third component is genuinely absent.
+            if cond.shape[-1] >= 3:
+                flow = cond[:, :3]
+            else:
+                zeros = cond.new_zeros(cond.shape[0], 1)
+                flow = torch.cat([cond[:, :2], zeros], dim=-1)
+            flow = flow.to(device=pos.device, dtype=pos.dtype)
         else:
             flow = self.default_flow_vec.to(device=pos.device, dtype=pos.dtype).expand(pos.shape[0], -1)
         return F.normalize(flow, dim=-1)
@@ -596,7 +603,7 @@ class UniFieldEncoder(nn.Module):
 
 
 __all__ = [
-    "UniFieldEncoder",
+    "VolumeUniFieldEncoder",
     "FlowManifoldBlock",
     "FlowEncoderStage",
     "SurfaceState",
@@ -604,7 +611,7 @@ __all__ = [
 
 
 if __name__ == "__main__":
-    model = UniFieldEncoder(
+    model = VolumeUniFieldEncoder(
         embed_dims=(32, 64, 128, 256),
         depths=(1, 1, 1, 1),
         num_heads=(2, 4, 4, 8),

@@ -1,0 +1,24 @@
+{
+  "surface_pressure_mean": [
+    -93.4098
+  ],
+  "surface_pressure_std": [
+    120.787
+  ],
+  "volume_pressure_mean": [
+    -62.4053
+  ],
+  "volume_pressure_std": [
+    94.2394
+  ],
+  "volume_velocity_mean": [
+    21.8719,
+    -0.237778,
+    0.673902
+  ],
+  "volume_velocity_std": [
+    12.1079,
+    3.97768,
+    3.90113
+  ]
+}

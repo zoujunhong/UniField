@@ -1,0 +1,31 @@
+{
+  "complete": true,
+  "total_cases_audited": 8119,
+  "excluded": {
+    "F_D_WM_WW_0464": {
+      "original_vertex_indices": [
+        37478,
+        38413
+      ],
+      "field_cache_rows": [
+        6415
+      ],
+      "forest_sha256": "0630a8442c635f82c44c46d20f440d8525ea2eefb11fc96ce0a44a3fead5c879"
+    },
+    "F_D_WM_WW_1772": {
+      "original_vertex_indices": [
+        130809,
+        131144
+      ],
+      "field_cache_rows": [
+        19667
+      ],
+      "forest_sha256": "1aaadce79dec49c8456ac69b1a1e9c806e090d28d522cf5155e498eb6328fe8c"
+    }
+  },
+  "rule": "original vertex referenced by no face; never filter by pressure or repaired ownership",
+  "provenance": {
+    "/data/home/zdhs0017/zoujunhong/code/PINN/temp/20261109_092616_forest_recovery_test/log/diagnosis.json": "ca0d75b13edf3b8630361637f9db018da8bbf8a4173252b6e1c4f70f080f7032",
+    "/data/home/zdhs0017/zoujunhong/code/PINN/temp/20261109_092616_forest_recovery_test/log/cache_recovery.json": "50024924dc73636e23ffc446b23efb0e069b379d31bb64f44003234df0b00e96"
+  }
+}

@@ -4,12 +4,18 @@ from typing import Any
 
 import torch
 
-from loss import supervised_field_loss, volume_relation_loss
+from loss import (
+    surface_force_control_variate_coefficient,
+    surface_force_control_variate_loss,
+    supervised_field_loss,
+)
 
 
 FIELD_DIMS = {
     "p": 1,
     "U": 3,
+    "normal": 3,
+    "normals": 3,
     "k": 1,
     "omega": 1,
     "nut": 1,
@@ -20,6 +26,7 @@ FIELD_DIMS = {
     "Cl": 1,
     "Cs": 1,
     "Cm_overturn": 1,
+    "Aref": 1,
 }
 
 
@@ -168,18 +175,6 @@ def compute_query_loss(
             pred_slice = slice(*item["pred_slice"])
             target_slice = volume_slices[field]
             value = supervised_field_loss(volume_pred[..., pred_slice], volume_target[..., target_slice], item)
-        elif domain == "volume_relation":
-            if volume_pred.shape[1] == 0:
-                continue
-            value = volume_relation_loss(
-                field,
-                volume_pred,
-                volume_target,
-                volume_slices,
-                item,
-                batch=batch,
-                task_config=task_config,
-            )
         elif domain == "coefficients":
             if coeff_pred is None:
                 raise ValueError("Model output does not include coefficient predictions.")
@@ -187,7 +182,77 @@ def compute_query_loss(
                 continue
             pred_slice = slice(*item["pred_slice"])
             target_slice = coefficient_slices[field]
-            value = supervised_field_loss(coeff_pred[..., pred_slice], coefficient_target[..., target_slice], item)
+            scale = float(item.get("scale", 1.0))
+            if scale <= 0.0:
+                raise ValueError("Coefficient loss scale must be positive.")
+            value = supervised_field_loss(
+                coeff_pred[..., pred_slice] / scale,
+                coefficient_target[..., target_slice] / scale,
+                item,
+            )
+        elif domain == "surface_integral":
+            if surface_count == 0:
+                continue
+            normals = batch.get("normals")
+            area = batch.get("area")
+            if normals is None or area is None:
+                raise ValueError("surface_integral losses require normal and area in surface_input_list.")
+            if normals.shape[1] != surface_count or area.shape[1] != surface_count:
+                raise ValueError(
+                    "surface_integral losses require queries to reuse the sampled surface input points."
+                )
+            if coefficient_target.shape[-1] == 0:
+                raise ValueError("surface_integral losses require Aref in coefficient_target_list.")
+            pred_slice = slice(*item.get("pred_slice", (0, 1)))
+            target_field = str(item.get("target_field", "p"))
+            reference_field = str(item.get("reference_area_field", "Aref"))
+            value = surface_force_control_variate_loss(
+                surface_pred[..., pred_slice],
+                surface_target[..., surface_slices[target_field]],
+                normals,
+                area,
+                coefficient_target[..., coefficient_slices[reference_field]],
+                coefficient_target[..., coefficient_slices[field]],
+                direction=item["direction"],
+                scale=float(item.get("scale", 1.0)),
+                beta=float(item.get("beta", 1.0)),
+            )
+        elif domain == "coefficient_integral_consistency":
+            if coeff_pred is None:
+                raise ValueError("Model output does not include coefficient predictions.")
+            if surface_count == 0:
+                continue
+            normals = batch.get("normals")
+            area = batch.get("area")
+            if normals is None or area is None:
+                raise ValueError(
+                    "coefficient_integral_consistency requires normal and area in surface_input_list."
+                )
+            if normals.shape[1] != surface_count or area.shape[1] != surface_count:
+                raise ValueError(
+                    "coefficient_integral_consistency requires queries to reuse surface input points."
+                )
+            pred_slice = slice(*item["pred_slice"])
+            cp_pred_slice = slice(*item.get("cp_pred_slice", (0, 1)))
+            target_field = str(item.get("target_field", "p"))
+            reference_field = str(item.get("reference_area_field", "Aref"))
+            coefficient_cv = surface_force_control_variate_coefficient(
+                surface_pred[..., cp_pred_slice],
+                surface_target[..., surface_slices[target_field]],
+                normals,
+                area,
+                coefficient_target[..., coefficient_slices[reference_field]],
+                coefficient_target[..., coefficient_slices[field]],
+                direction=item["direction"],
+            )
+            scale = float(item.get("scale", 1.0))
+            if scale <= 0.0:
+                raise ValueError("Coefficient consistency scale must be positive.")
+            value = supervised_field_loss(
+                coeff_pred[..., pred_slice] / scale,
+                coefficient_cv / scale,
+                item,
+            )
         else:
             raise ValueError(f"Unsupported loss domain: {domain}")
         losses[f"{domain}_{field}"] = value

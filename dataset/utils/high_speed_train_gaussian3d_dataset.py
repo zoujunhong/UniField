@@ -18,6 +18,7 @@ from dataset.cache.high_speed_train import (
     DEFAULT_CACHE_DTYPE,
     DEFAULT_VOLUME_CACHE_POINTS,
     HIGH_SPEED_TRAIN_ROOT,
+    HIGH_SPEED_TRAIN_CACHE_ROOT,
     cache_numpy_dtype,
     cache_path,
     high_speed_case_sort_key,
@@ -26,6 +27,8 @@ from dataset.cache.high_speed_train import (
     valid_npy_cache,
 )
 from dataset.utils.high_speed_train_dataset import (
+    discover_high_speed_cached_cases,
+    high_speed_case_type_path,
     _required_high_speed_cols,
     _split_high_speed_names_by_geometry,
     read_high_speed_coefficients,
@@ -116,7 +119,7 @@ class HighSpeedTrainGaussian3DDatasetBase(Dataset):
             raise ValueError("split must be 'all', 'train', 'val', or 'test'.")
         self.root_dir = root_dir
         self.train_type = normalized_train_type(train_type)
-        self.cache_root = cache_root or os.path.join(root_dir, "cache")
+        self.cache_root = cache_root or HIGH_SPEED_TRAIN_CACHE_ROOT
         self.gaussian_cache_root = gaussian_cache_root or self.cache_root
         self.repeat = int(repeat)
         self.center_x = bool(center_x)
@@ -149,7 +152,7 @@ class HighSpeedTrainGaussian3DDatasetBase(Dataset):
             self.num_query_points,
         )
 
-        case_dirs = list_high_speed_cases(root_dir, self.train_type)
+        case_dirs = discover_high_speed_cached_cases(root_dir, self.train_type, self.cache_root)
         names = filter_names([path.name for path in case_dirs], ids_file)
         names = _split_high_speed_names_by_geometry(
             names,
@@ -253,7 +256,7 @@ class HighSpeedTrainGaussian3DDatasetBase(Dataset):
             volume_query = volume_query.copy()
             volume_query[:, 0] -= float(meta["x_center"][0])
 
-        type_dir = high_speed_type_dir(self.root_dir, self.train_type)
+        type_dir = high_speed_case_type_path(self.root_dir, self.train_type)
         coefficient_target = read_high_speed_coefficients(type_dir / case_name, self.coefficient_target_list)
         surface_query = np.zeros((0, 3), dtype=np.float32)
         surface_target = np.zeros((0, 0), dtype=np.float32)

@@ -38,7 +38,7 @@ def setup_distributed(local_rank: int, config: dict) -> int:
             init_method=f"tcp://127.0.0.1:{int(config.get('port', 45325))}",
             world_size=gpu_num,
             rank=local_rank,
-            timeout=_datetime.timedelta(seconds=int(config.get("timeout_seconds", 300))),
+            timeout=_datetime.timedelta(seconds=int(config.get("timeout_seconds", 14400))),
         )
     return device
 

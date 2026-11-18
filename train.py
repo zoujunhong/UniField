@@ -1,8 +1,11 @@
+"""The config-only entry point for data-driven field model training."""
 from __future__ import annotations
 
 import argparse
 import os
+import signal
 import time
+from pathlib import Path
 
 import torch
 import torch.distributed as dist
@@ -10,275 +13,168 @@ import torch.multiprocessing as mp
 
 from dataset import build_dataset
 from model import build_model
-from utils.checkpoint import load_model_weights, save_checkpoint
-from utils.config import dataset_config_for_phase, load_config, resolve_path
-from utils.dataloader import MultiEpochsDataLoader
+from utils.checkpoint import ModelEMA, load_model_weights, load_training_checkpoint
+from utils.config import (apply_runtime_seed, configure_training_run, dataset_config_for_phase,
+                          load_main_config)
+from utils.dataloader import build_epoch_loader
 from utils.distributed import cleanup_distributed, is_main_process, set_seed, setup_distributed
-from utils.metrics import AverageMeter
 from utils.optim import build_optimizer
 from utils.scheduler import cosine_scheduler
-from utils.task import build_query, compute_query_loss, move_batch_to_device
+from utils.training import StopRequest, optimize_step, resolve_amp_dtype, validate_and_save
+from utils.training_pipeline import run_training_pipeline, write_status
 
 
-def train_one_epoch(model, loader, optimizer, scaler, lr_schedule, epoch: int, device, config: dict) -> None:
-    task_config = config["task"]
-    train_config = config["train"]
-    runtime_config = config["runtime"]
-    batch_time = AverageMeter()
-    loss_meter = AverageMeter()
-    field_meters: dict[str, AverageMeter] = {}
-    model.train()
-    if hasattr(loader.sampler, "set_epoch"):
-        loader.sampler.set_epoch(epoch)
-
-    tic = time.time()
-    max_iters = int(train_config.get("dry_run_iters", 0))
-    for idx, batch in enumerate(loader):
-        it = len(loader) * epoch + idx
-        for group in optimizer.param_groups:
-            group["lr"] = lr_schedule[it] * group["base_lr"]
-
-        batch = move_batch_to_device(batch, device, task_config["surface_input_list"])
-        query = build_query(
-            batch["surface_query"],
-            batch["volume_query"],
-            add_type_channel=bool(task_config.get("query_type_channel", True)),
-        )
-
-        optimizer.zero_grad(set_to_none=True)
-        with torch.autocast(
-            device_type="cuda",
-            dtype=torch.float16,
-            enabled=bool(runtime_config.get("amp", True)) and torch.cuda.is_available(),
-        ):
-            pred = model(
-                batch["surface_pos"],
-                query,
-                batch["cond"],
-                routes=batch["routes"],
-                normals=batch["normals"],
-                area=batch["area"],
-                geometry_meta=batch.get("geometry_meta"),
-            )
-            loss, losses = compute_query_loss(pred, batch, task_config)
-
-        scaler.scale(loss).backward()
-        scaler.unscale_(optimizer)
-        torch.nn.utils.clip_grad_norm_(model.parameters(), float(train_config.get("clip_grad", 0.1)))
-        scaler.step(optimizer)
-        scaler.update()
-
-        batch_time.update(time.time() - tic)
-        tic = time.time()
-        loss_meter.update(loss.detach())
-        for key, value in losses.items():
-            if key == "total":
-                continue
-            field_meters.setdefault(key, AverageMeter()).update(value.detach())
-
-        if is_main_process() and idx % int(train_config.get("log_interval", 10)) == 0:
-            field_text = ", ".join(f"{key}: {meter.average():.6f}" for key, meter in field_meters.items())
-            text = (
-                f"[{epoch}][{idx}/{len(loader)}], lr: {lr_schedule[it]:.6f}, "
-                f"time: {batch_time.average():.2f}, Loss: {loss_meter.average():.6f}"
-            )
-            if field_text:
-                text = f"{text}, {field_text}"
-            print(text, flush=True)
-            os.makedirs("log", exist_ok=True)
-            with open(f"log/{os.path.basename(train_config['saveroot'])}.txt", "a", encoding="utf-8") as f:
-                print(text, file=f)
-
-        if max_iters > 0 and idx + 1 >= max_iters:
-            break
+def train_worker(rank: int, config: dict) -> None:
+    runtime, train = config['runtime'], config['train']
+    torch.set_num_threads(int(runtime.get('cpu_threads', 4)))
+    set_seed(int(runtime.get('seed', 200099)) + rank)
+    torch.set_float32_matmul_precision(runtime.get('matmul_precision', 'high'))
+    device_index = setup_distributed(rank, runtime.get('distributed', {}))
+    device = torch.device('cuda', device_index) if torch.cuda.is_available() else torch.device('cpu')
+    try:
+        _train(config, device)
+    finally:
+        cleanup_distributed()
 
 
-def main_worker(local_rank: int, config: dict) -> None:
-    runtime_config = config["runtime"]
-    train_config = config["train"]
-    set_seed(int(runtime_config.get("seed", 200099)) + local_rank)
-    torch.set_float32_matmul_precision(runtime_config.get("matmul_precision", "high"))
-
-    device_index = setup_distributed(local_rank, runtime_config.get("distributed", {}))
-    device = torch.device("cuda", device_index) if torch.cuda.is_available() else torch.device("cpu")
-
-    if is_main_process():
-        print("===== config loaded =====", flush=True)
-        print("===== dataset loading ... =====", flush=True)
-    dataset = build_dataset(dataset_config_for_phase(config, "train"))
-    sampler = None
-    shuffle = True
-    if dist.is_available() and dist.is_initialized():
-        sampler = torch.utils.data.distributed.DistributedSampler(dataset, seed=int(runtime_config.get("seed", 200099)))
-        shuffle = False
-    loader = MultiEpochsDataLoader(
-        dataset,
-        batch_size=int(train_config.get("batch_size", 4)),
-        shuffle=shuffle,
-        sampler=sampler,
-        pin_memory=torch.cuda.is_available(),
-        num_workers=int(train_config.get("workers", 4)),
-        drop_last=True,
-    )
-    if is_main_process():
-        print("===== dataset loaded =====", flush=True)
-        print("===== model loading ... =====", flush=True)
-
-    model = build_model(config["model"])
-    if is_main_process():
-        param_count = sum(p.numel() for p in model.parameters() if p.requires_grad)
-        print(f"模型参数量：{param_count / 1e6:.2f}M", flush=True)
-
-    if train_config.get("checkpoint"):
-        load_model_weights(
-            model,
-            train_config["checkpoint"],
-            route_map=train_config.get("route_map"),
-            partial_load=bool(train_config.get("partial_load", False)),
-        )
+def _train(config: dict, device: torch.device) -> None:
+    runtime, train = config['runtime'], config['train']
+    if config.get('coordinate_statistics'):
+        from dataset.cache.drivaernet import load_or_compute_coordinate_statistics
         if is_main_process():
-            print("===== checkpoint loaded =====", flush=True)
-    if int(train_config.get("resume_epoch", 0)) > 0:
-        resume_path = os.path.join(train_config["saveroot"], f"model_epoch_{int(train_config['resume_epoch'])}.pth")
-        load_model_weights(model, resume_path, strict=True)
-        if is_main_process():
-            print(f"===== resume from epoch {train_config['resume_epoch']} =====", flush=True)
-
-    model = model.to(device).float()
-    if dist.is_available() and dist.is_initialized():
-        model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[device_index])
-    if bool(runtime_config.get("compile", False)):
-        print("Compiling model with torch.compile()...")
-        model = torch.compile(model)
-
-    optimizer_config = {
-        "name": train_config.get("optimizer", "AdamW"),
-        "lr": train_config.get("lr", 1e-4),
-        "weight_decay": train_config.get("weight_decay", 0.04),
-        "kwargs": {"eps": train_config.get("eps", 1e-7)},
-        "special_keyword": train_config.get("special_keyword", ["adapt"]),
-        "special_lr": train_config.get("special_lr", [train_config.get("lr", 1e-4)]),
-    }
-    optimizer = build_optimizer(model, optimizer_config)
-    total_epoch = int(train_config.get("total_epoch", 200))
-    lr_schedule = cosine_scheduler(
-        1.0,
-        float(train_config.get("final_lr_ratio", 0.01)),
-        total_epoch,
-        len(loader),
-        warmup_iters=min(int(train_config.get("warmup_iters", 5000)), max(total_epoch * len(loader) - 1, 0)),
-    )
-    scaler = torch.amp.GradScaler(enabled=bool(runtime_config.get("amp", True)) and torch.cuda.is_available())
-
-    start_epoch = int(train_config.get("resume_epoch", 0))
-    for epoch in range(start_epoch, total_epoch):
-        train_one_epoch(model, loader, optimizer, scaler, lr_schedule, epoch, device, config)
-        if is_main_process() and (epoch + 1) % int(train_config.get("save_step", 50)) == 0:
-            path = save_checkpoint(model, train_config["saveroot"], epoch + 1)
-            print(f"saved checkpoint: {path}", flush=True)
-        if int(train_config.get("dry_run_iters", 0)) > 0:
-            break
-
+            load_or_compute_coordinate_statistics(**config['coordinate_statistics'])
+        if dist.is_initialized():
+            dist.barrier()
+    dataset = build_dataset(dataset_config_for_phase(config, 'train'))
+    model = build_model(config['model']).to(device).float()
+    resume = train.get('resume_checkpoint')
+    if train.get('checkpoint') and not resume:
+        load_model_weights(model, train['checkpoint'], route_map=train.get('route_map'), partial_load=bool(train.get('partial_load', False)), trusted_legacy=bool(train.get('trust_legacy_checkpoint', False)))
+    if bool(runtime.get('compile', False)):
+        model.compile()
+    if dist.is_initialized():
+        model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[device.index] if device.type == 'cuda' else None)
+    optimizer_kwargs = dict(train.get('optimizer_kwargs', {}))
+    if train.get('optimizer', 'AdamW') in ('Adam', 'AdamW'):
+        optimizer_kwargs.setdefault('eps', float(train.get('eps', 1e-7)))
+    optimizer = build_optimizer(model, dict(name=train.get('optimizer', 'AdamW'), kwargs=optimizer_kwargs,
+        lr=train.get('lr', 1e-4), weight_decay=train.get('weight_decay', .04),
+        special_keyword=train.get('special_keyword', []), special_lr=train.get('special_lr', [])))
+    scaler = torch.amp.GradScaler(enabled=bool(runtime.get('amp', True)) and device.type == 'cuda' and resolve_amp_dtype(runtime) == torch.float16)
+    ema_settings = train.get('ema', {})
+    if ema_settings is True:
+        ema_settings = {'enabled': True}
+    ema = ModelEMA(model, float(ema_settings.get('decay', .999))) if ema_settings and ema_settings.get('enabled', True) else None
+    total_steps = int(train['total_steps'])
+    schedule = cosine_scheduler(1., float(train.get('final_lr_ratio', .01)), 1, total_steps,
+        warmup_iters=min(int(train.get('warmup_iters', 5000)), total_steps - 1))
+    progress = dict(global_step=0, epoch=0, batch_offset=0, dataset_length=len(dataset))
+    if resume:
+        path = Path(train['saveroot']) / 'latest.pth' if resume == 'latest' else Path(resume).expanduser()
+        progress = load_training_checkpoint(model, optimizer, scaler, config, path, ema=ema)
+        if progress['dataset_length'] != len(dataset):
+            raise ValueError('Dataset length changed since the resumable checkpoint.')
+    if not 0 <= progress['global_step'] <= total_steps:
+        raise ValueError('Checkpoint step lies outside the configured total_steps.')
+    stop = StopRequest()
     if is_main_process():
-        print("Training Done!", flush=True)
-    cleanup_distributed()
+        write_status(Path(train['log_dir']) / 'status.json', dict(status='running', step=progress['global_step'], total_steps=total_steps))
+    if is_main_process():
+        print(f"Training: {sum(p.numel() for p in model.parameters() if p.requires_grad)/1e6:.2f} M parameters, step {progress['global_step']}/{total_steps}", flush=True)
+    stopped = False
+    while progress['global_step'] < total_steps and not stopped:
+        epoch = progress['epoch']
+        loader = build_epoch_loader(dataset, config, epoch=epoch, start_batch=progress['batch_offset'])
+        epoch_batches = loader.batch_sampler.full_length
+        if epoch_batches <= 0:
+            raise ValueError('Training split is too small for the batch size and world size.')
+        if 'steps_per_epoch' in progress and progress['steps_per_epoch'] != epoch_batches:
+            raise ValueError('Batch size or sampler length changed since the resume checkpoint.')
+        progress['steps_per_epoch'] = epoch_batches
+        for data in loader:
+            if stop.synchronize(device):
+                stopped = True
+                break
+            tick = time.perf_counter()
+            step = progress['global_step']
+            for group in optimizer.param_groups:
+                group['lr'] = float(schedule[step]) * group['base_lr']
+            model.train()
+            losses = optimize_step(model, data, optimizer, scaler, config, device, progress)
+            if ema is not None:
+                ema.update()
+            progress['global_step'] += 1
+            progress['batch_offset'] += 1
+            offset = progress['batch_offset']
+            if offset == epoch_batches:
+                progress.update(epoch=epoch + 1, batch_offset=0)
+            step = progress['global_step']
+            if is_main_process() and (step == 1 or step % int(train.get('log_interval', 10)) == 0):
+                fields = ', '.join(f'{key}: {value:.6f}' for key, value in losses.items() if key != 'total')
+                line = f"[{epoch}][{offset}/{epoch_batches}], lr: {optimizer.param_groups[0]['lr']:.6f}, time: {time.perf_counter()-tick:.2f}, Loss: {losses['total']:.6f}"
+                if fields:
+                    line += ', ' + fields
+                print(line, flush=True)
+                with Path(train['log_path']).open('a') as stream:
+                    stream.write(line + '\n')
+            validate_and_save(model, optimizer, scaler, ema, config, progress, device,
+                              save_latest=step % int(train['checkpoint_interval_steps']) == 0)
+            if step >= total_steps or int(train.get('stop_after_step', 0)) and step >= int(train['stop_after_step']):
+                stopped = step < total_steps
+                break
+    validate_and_save(model, optimizer, scaler, ema, config, progress, device, save_latest=True,
+                      force_validation=progress['global_step'] == total_steps and total_steps % int(train['validation']['interval']) != 0)
+    if is_main_process():
+        write_status(Path(train['log_dir']) / 'status.json', dict(status='stopped' if stopped else 'complete', step=progress['global_step'], total_steps=total_steps))
+        print(f"Training {'paused' if stopped else 'complete'} at optimizer step {progress['global_step']}/{total_steps}.", flush=True)
 
 
-def _resolve_dataset_option_path(config: dict) -> str:
-    dataset_name = config.get("dataset")
-    dataset_option = config.get("dataset_option")
-    if not dataset_name or not dataset_option:
-        raise KeyError("Experiment config must define dataset and dataset_option.")
-    return str(resolve_path(f"config/dataset/{dataset_name}/{dataset_option}.py", config.get("_config_dir")))
-
-
-def _resolve_model_size_path(config: dict) -> str:
-    model_name = config.get("model")
-    model_size = config.get("model_size")
-    if not model_name or not model_size:
-        raise KeyError("Experiment config must define model and model_size.")
-    return str(resolve_path(f"config/model/{model_name}/{model_size}.py", config.get("_config_dir")))
-
-
-def _task_items(task_config: dict) -> list[dict]:
-    items = []
-    for key in ("losses", "eval_fields"):
-        values = task_config.get(key, [])
-        if values:
-            items.extend(values)
-    return items
-
-
-def _max_pred_slice_end(items: list[dict], domains: set[str]) -> int:
-    ends = []
-    for item in items:
-        if item.get("domain") in domains and "pred_slice" in item:
-            ends.append(int(item["pred_slice"][1]))
-    return max(ends) if ends else 0
-
-
-def _check_task_model_compatibility(config: dict) -> None:
-    task_config = config.get("task", {})
-    model_config = config.get("model", {})
-    items = _task_items(task_config)
-    needs_coefficient_head = any(item.get("domain") == "coefficients" for item in items)
-    coefficient_head_kwargs = model_config.get("coefficient_head_kwargs")
-
-    if needs_coefficient_head:
-        if not task_config.get("coefficient_target_list"):
-            raise ValueError("Task uses coefficient losses/eval fields but coefficient_target_list is empty.")
-        if not coefficient_head_kwargs:
-            raise ValueError(
-                "Task uses coefficient losses/eval fields but model has no coefficient_head_kwargs. "
-                "Use a coefficient model size such as MediumCoeff or remove coefficient items from the task."
-            )
-    elif "coefficient_head_kwargs" in model_config:
-        model_config.pop("coefficient_head_kwargs", None)
-        print(
-            "Config check: removed coefficient_head_kwargs because task has no coefficient losses/eval fields.",
-            flush=True,
-        )
-
-    query_out_channels = int(model_config.get("decoder_kwargs", {}).get("out_channels", 0))
-    query_required = _max_pred_slice_end(items, {"surface", "volume"})
-    if query_out_channels and query_required > query_out_channels:
-        raise ValueError(
-            f"Task query pred_slice requires {query_required} output channels, "
-            f"but model decoder out_channels={query_out_channels}."
-        )
-    if needs_coefficient_head:
-        coeff_out_channels = int(coefficient_head_kwargs.get("out_channels", 0))
-        coeff_required = _max_pred_slice_end(items, {"coefficients"})
-        if coeff_out_channels and coeff_required > coeff_out_channels:
-            raise ValueError(
-                f"Task coefficient pred_slice requires {coeff_required} output channels, "
-                f"but coefficient head out_channels={coeff_out_channels}."
-            )
-
-
-def load_main_config(path: str) -> dict:
-    config = load_config(path)
-    config["_dataset_name"] = config.get("dataset")
-    config["_dataset_option"] = config.get("dataset_option")
-    config["_model_name"] = config.get("model")
-    config["_model_size"] = config.get("model_size")
-    config["dataset"] = load_config(_resolve_dataset_option_path(config))
-    config["model"] = load_config(_resolve_model_size_path(config))
-    _check_task_model_compatibility(config)
-    return config
+def dsapt_worker(rank: int, config: dict) -> None:
+    distributed = config['runtime'].get('distributed', {})
+    os.environ.update(LOCAL_RANK=str(rank), RANK=str(rank), WORLD_SIZE=str(distributed.get('gpu_num', 1)),
+                      MASTER_ADDR='127.0.0.1', MASTER_PORT=str(distributed.get('port', 45325)))
+    from utils.training_dsapt import train_dsapt
+    train_dsapt(config)
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Config-driven UniField training.")
-    parser.add_argument("--config", required=True, help="Path to a Python config file exporting CONFIG.")
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--config', required=True, help='Executable experiment or log variant config.py')
     args = parser.parse_args()
-    config = load_main_config(args.config)
-    gpu_num = int(config.get("runtime", {}).get("distributed", {}).get("gpu_num", 1))
-    if gpu_num > 1:
-        mp.spawn(main_worker, nprocs=gpu_num, args=(config,))
+    config = configure_training_run(load_main_config(args.config))
+    apply_runtime_seed(config)
+    saved = [Path(config['train']['saveroot']) / name for name in ('latest.pth', 'best.pth', 'latest_ema.pth', 'best_ema.pth')]
+    existing = next((path for path in saved if path.exists()), None)
+    if existing is not None and not config['train'].get('resume_checkpoint'):
+        raise FileExistsError(f'{existing} already exists; use an explicit complete-state resume or a separate initialization variant.')
+    run_training_pipeline(config, _launch_workers)
+
+
+def _launch_workers(config):
+    worker = dsapt_worker if config['train'].get('engine') == 'dsapt' else train_worker
+    world = int(config['runtime'].get('distributed', {}).get('gpu_num', 1))
+    if worker is dsapt_worker:
+        start = int(config['runtime'].get('distributed', {}).get('start_gpu', 0))
+        if start:
+            os.environ['CUDA_VISIBLE_DEVICES'] = ','.join(str(i) for i in range(start, start + world))
+    if world > 1:
+        context = mp.spawn(worker, nprocs=world, args=(config,), join=False)
+        previous = {}
+        def request_stop(signum, frame):
+            for process in context.processes:
+                if process.is_alive():
+                    os.kill(process.pid, signal.SIGUSR1)
+        try:
+            for kind in (signal.SIGINT, signal.SIGTERM, signal.SIGUSR1):
+                previous[kind] = signal.signal(kind, request_stop)
+            while not context.join():
+                pass
+        finally:
+            for kind, handler in previous.items():
+                signal.signal(kind, handler)
     else:
-        main_worker(0, config)
+        worker(0, config)
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()

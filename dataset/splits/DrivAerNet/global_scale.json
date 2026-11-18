@@ -1,0 +1,17 @@
+{
+  "schema": "cached_surface_global_radius_v1",
+  "global_scale": 2.5010738971763513,
+  "training_cases": 5817,
+  "training_fingerprint": "4ca0257fc16ead00f686409c4a48ed0259d7f24cbcdabc090276961e9e15a762",
+  "data_root": "/data/group/project1/CFD/DrivAerNet++/cache/surface65536_volume200000_fp16_v1",
+  "surface_points": 65536,
+  "source_storage": "float16",
+  "accumulation_dtype": "float64",
+  "method": "mean(max(norm(x - mean(x)))) over cached 65536 xyz; float64 accumulations",
+  "radius_min": 2.215308866552135,
+  "radius_max": 2.7660915809528195,
+  "radius_std": 0.11655848412728752,
+  "per_case_records": "/data/home/zdhs0017/zoujunhong/code/PINN/temp/20261102_031800_utonia_abupt_recipe/log/scale_cases.jsonl",
+  "source_manifest_sha256": "d27b99a3fafb7ecf2e7ac0e0cc30c488f6c3e9033f3db4de00a989263ba80b58",
+  "raw_vtk_read_for_scale": false
+}

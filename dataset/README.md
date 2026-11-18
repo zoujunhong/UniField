@@ -1,83 +1,38 @@
-# Dataset Organization
+# 数据与缓存
 
-`dataset/` is organized around query-style field prediction.
+原始 CFD 数据在 `/lustre/home/zdhs0017/data/`，公共 DrivAerNet++ 原始文件保持 `/lustre/group/project1/CFD/DrivAerNet++/`。所有缓存位于个人 `~/zoujunhong/data/`，DrivAerNet++ 正式缓存根为 `~/zoujunhong/data/DrivAerNet/`。源码仓库只保存读取/构建程序、冻结 split、schema 和小型元数据。
 
-## Directory Rules
+| 数据集 | 原始数据（相对 /lustre/home/zdhs0017/data） | 个人缓存 |
+|---|---|---|
+| DrivAerNet++ | 公共项目目录（例外） | DrivAerNet/cases/<case>/ |
+| HighSpeedTrain | HighSpeedTrain/ | HighSpeedTrain/cases/<case>/ |
+| AircraftWing / FullAircraft | Flight/ | AircraftWing/cases/、FullAircraft/cases/ |
+| ThingiCFD | ThingiCFD/ | ThingiCFD/cases/ |
+| GeometryGen 表面 | GeometryGen/CanonicalSurface/ | GeometryGen/surface/cases/ |
+| GeometryGen 联合场 | GeometryGen/results/ 及原始 campaign | GeometryGen/volume/cases/ |
+| RocketCFD 表面 | RocketCFD/source/ | RocketCFD/cases/ |
+| Rocket 联合场 | rocket/extracted/ | RocketCFD/volume/cases/ |
 
-- `utils/` contains reusable, dataset-agnostic helpers such as VTK loading, geometry extraction, sampling, and normalization.
-- `surface/` contains surface-side dataset components. These components read surface cache files and return encoder inputs, surface query coordinates, and surface targets.
-- `volume/` contains volume-side dataset components. These components read volume cache files and return volume query coordinates and volume targets.
-- `cache/` contains cache builders for raw CFD files. Training code should read cache files instead of raw VTK files.
-- Root-level dataset files compose one surface component and one volume component into a full PyTorch `Dataset`.
-- The only maintained root dataset files are `DrivAerNet.py`, `CRH450.py`, and `Maglev.py`. Each file must export a `Dataset` alias so `dataset.build_dataset(...)` can load it by name.
+每例一个文件夹，含 surface.npy、可用时的 volume.npy 与 metadata.json。JSON 记录字段顺序、单位/压力约定、工况、已有力系数、来源和 split；input.npy、原始索引、几何拓扑等辅助文件必须记录语义。缓存不等于原始数据：有限采样、坐标变换和精度必须显式说明，禁止把 Cp、Pa 和运动学压力互相当作同一标签。
 
-## Unified Return Interface
+DrivAerNet++ 的 `DrivAerNet/cases/<case>/` 保存原始物理量；主池保留现有实验的混合精度和行序，另保留的随机/空间均匀100000点表面池位于每例 `pools/<profile>/`，通过 `cache_profile` 显式选择。新建池采用 FP32 named fields，字段数量和点数不与模型绑定。详见 [CACHE_FORMAT.md](CACHE_FORMAT.md)。固定测试点在个人 `DrivAerNet/` 下的 test_point_sets、query_normals、shared_points_set00；冻结划分在 dataset/splits/DrivAerNet。
 
-Every composed dataset returns exactly seven values:
+## 读取接口
 
-```python
-surface_input, surface_query, surface_target, volume_query, volume_target, cond, route
-```
-
-- `surface_input`: encoder input point cloud. The first three channels are always `xyz`; optional channels are configured by `surface_input_list`, for example `["xyz", "normal", "area"]`.
-- `surface_query`: surface query coordinates with shape `(Nsurface, 3)`.
-- `surface_target`: target fields for surface queries, configured by `surface_target_list`.
-- `volume_query`: volume query coordinates with shape `(Nvolume, 3)`.
-- `volume_target`: target fields for volume queries, configured by `volume_target_list`.
-- `cond`: free-stream or dataset condition vector.
-- `route`: integer route id for multi-domain models.
-
-If surface or volume data is disabled, the corresponding query and target tensors are zero-length tensors rather than `None`.
-
-## Field Lists
-
-Fields are selected by list arguments:
+组合 dataset 返回：
 
 ```python
-surface_input_list=["xyz", "normal", "area"]
-surface_target_list=["p"]
-volume_target_list=["U"]
+surface_input, surface_query, surface_target, volume_query, volume_target, cond, route, coefficient_target
 ```
 
-Scalar fields add one channel. `U`, `xyz`, and `normal` add three channels.
+原生模型需要时可附加第九项 geometry metadata，例如 query_normals。未监督域通常返回空目标；ABUPT 的双域锚点上下文可以有 query 而没有监督量。dataset/surface 和 dataset/volume 管理采样/标签，dataset/cache 管理构建，dataset/utils 放公共解析和几何工具。
 
-## Adding A Dataset
+验证通过 dataset/validation.py 统一设置：完整有效划分，各受监督域一组10000随机 query；在任何归一化前筛除物理 Cp < -10 的整行。其他物理量不额外设阈值。几何输入不按标签筛选。训练及测试不自动继承验证阈值，测试保留固定点集。
 
-1. Add shared parsing/cache helpers under `utils/` or `cache/` only if they are reusable.
-2. Add a surface component under `surface/` and a volume component under `volume/`, even if one side only returns empty tensors.
-3. Add a root-level composed dataset file that owns the PyTorch `Dataset` interface and returns the unified seven-value tuple.
-4. Export `Dataset = YourDatasetClass` in the root dataset file. Dynamic loading will find it by file name.
+缓存构建是独立任务，先依 AGENTS 选择没有训练的计算节点，再通过 `python -m dataset.cache.<builder>` 执行。常规评估读取缓存；显式全点评估直接读取原始 VTK。常规模式缺缓存明确报错，不静默补建。过去交付后按用户要求删除的 FullFieldCache 大数组不重新伪造，现存 manifest 与构建说明在 [splits/FullFieldCache](splits/FullFieldCache/README.md)。
 
-## Config-Driven Construction
+高铁主 FP32 随机池保存在 `HighSpeedTrain/cases/<case>/surface.npy`（100000 点）与 `volume.npy`（300000 点）。FP16、不同采样方式/点数、triplane 和 Gaussian 等表示保存在同例 `auxiliary/<profile>/data.npy` 或 `data.npz`，例如 `surface_random_100000_fp16`、`triplane_32x128x128_fp32`。每例 `metadata.json` 的 `auxiliary` 索引记录文件、数组 shape/dtype；共享 occupancy decoder 仅保存于 `HighSpeedTrain/shared/<CRH450或Maglev>/<profile>/_shared_occupancy_decoder.pt`，由索引引用。构建器和 reader 使用统一路径函数，不保留旧平铺目录链接。只有辅助表示、缺主场的案例标为 `cache_only`，不进入冻结的 497 例主训练 cohort。
 
-Datasets are built from Python config dictionaries:
+GeneratedHighSpeedTrain 的历史 surface/query/support pool 同样在 `cases/<case>/auxiliary/<profile>/`，不覆盖主 Cp 表面数组。`fv_face_shards_v1` 属于 PINN 的局部物理采样缓存，metadata 明示 owner、partial 与完整性；第二例只有 15 shards、缺原元数据，不能当作完整训练缓存使用。
 
-```python
-CONFIG = {
-    "name": "DrivAerNet",
-    "kwargs": {...},
-}
-```
-
-Multiple datasets can be merged:
-
-```python
-CONFIG = {
-    "name": ["CRH450", "Maglev"],
-    "kwargs": {
-        "CRH450": {...},
-        "Maglev": {...},
-    },
-}
-```
-
-Merged datasets must have identical `surface_input_list`, `surface_target_list`, `volume_target_list`, and sample counts.
-
-Dataset option configs should describe the data shape, fields, sampling counts, normalization, and route id. Stage-specific splits belong in the experiment config:
-
-```python
-"train": {"dataset_kwargs": {"ids_file": ".../train_design_ids.txt"}},
-"test": {"dataset_kwargs": {"ids_file": ".../val_design_ids.txt"}},
-```
-
-For CRH450 and Maglev, `{"split": "train"}` selects cases by geometry id: CRH450 `geo_1`-`geo_18` and Maglev `geo_1`-`geo_27`. `{"split": "test"}` or `{"split": "val"}` selects CRH450 `geo_19`-`geo_20` and Maglev `geo_28`-`geo_30`. Incomplete or partially written high-speed cache files are skipped by default.
+RocketCFD 表面的新默认 train/val/test 使用已发布的互斥子集：train 保持 train；val 为全部 aoa_interpolation；test 为 aoa_extrapolation、geometry_generalization、ood_geometry 的并集。此处不再额外做 hash 子划分。历史结果保留原 subset 选择。联合场 RocketSurfaceVolume 有其独立按几何冻结的 train/val/test manifest，不能混用两者划分。

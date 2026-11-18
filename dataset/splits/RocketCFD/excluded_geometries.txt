@@ -1,0 +1,2 @@
+g020	quarantined: incorrect canonical orientation and unreliable CFD fields
+g050	quarantined: multi-body geometry/orientation issue and divergent CFD fields

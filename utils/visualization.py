@@ -13,6 +13,27 @@ PLANE_AXES = {
     "z": (0, 1, "x", "y"),
 }
 
+# Canonical surface-rendering camera. The direction is expressed from the
+# focal point towards the camera, matching ``pyvista.Plotter.view_vector``.
+DEFAULT_SURFACE_VIEW_DIR = np.array(
+    (-23.693090204904507, -40.35605814552794, 22.95675074358227),
+    dtype=np.float64,
+) - np.array(
+    (29.568204425579996, 3.2311606131116224, 0.7593301441641073),
+    dtype=np.float64,
+)
+DEFAULT_SURFACE_VIEW_DIR /= np.linalg.norm(DEFAULT_SURFACE_VIEW_DIR)
+DEFAULT_SURFACE_VIEW_UP = (0.2301847479424644, 0.20337235341420146, 0.9516589030117006)
+
+
+def set_default_pyvista_surface_camera(plotter, zoom: float = 1.15) -> None:
+    """Apply the repository's canonical direction and up vector to a Plotter."""
+
+    plotter.enable_parallel_projection()
+    plotter.view_vector(DEFAULT_SURFACE_VIEW_DIR, viewup=DEFAULT_SURFACE_VIEW_UP)
+    plotter.camera.zoom(float(zoom))
+    plotter.reset_camera_clipping_range()
+
 
 def to_numpy(tensor: torch.Tensor) -> np.ndarray:
     return tensor.detach().float().cpu().numpy()

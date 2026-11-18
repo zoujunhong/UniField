@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import json
 import re
 from pathlib import Path
 
@@ -11,7 +12,8 @@ from dataset.utils.load import high_speed_type_dir, list_high_speed_cases, read_
 from dataset.utils.sampling import sample_rows_np, voxel_uniform_sample_rows
 
 
-HIGH_SPEED_TRAIN_ROOT = "/data/home/zdhs0017/OpenFOAM/Cases/high_speed_train_debug_parallel_data"
+HIGH_SPEED_TRAIN_ROOT = "/lustre/home/zdhs0017/data/HighSpeedTrain"
+HIGH_SPEED_TRAIN_CACHE_ROOT = "/data/home/zdhs0017/zoujunhong/data/HighSpeedTrain"
 DEFAULT_SURFACE_CACHE_POINTS = 100_000
 DEFAULT_VOLUME_CACHE_POINTS = 300_000
 DEFAULT_CACHE_DTYPE = "fp32"
@@ -88,9 +90,49 @@ def cache_dir(
     kind: str,
     points: int,
     cache_dtype: str = DEFAULT_CACHE_DTYPE,
+    case_name: str | None = None,
 ) -> str:
+    """Return the case collection, or one case's auxiliary profile directory."""
     cache_dtype = normalized_cache_dtype(cache_dtype)
-    return os.path.join(str(cache_root), normalized_train_type(train_type), f"{kind}_{int(points)}_{cache_dtype}")
+    root = Path(cache_root) / "cases"
+    if case_name is None:
+        return str(root)
+    return str(root / case_name / "auxiliary" / f"{kind}_{int(points)}_{cache_dtype}")
+
+
+def auxiliary_cache_path(cache_root: str | Path, case_name: str, profile: str, suffix: str) -> str:
+    return str(Path(cache_root) / "cases" / case_name / "auxiliary" / profile / f"data{suffix}")
+
+
+def shared_cache_dir(cache_root: str | Path, train_type: str, profile: str) -> str:
+    return str(Path(cache_root) / "shared" / normalized_train_type(train_type) / profile)
+
+
+def register_auxiliary_cache(path: str | Path, *, arrays=None, shared_decoder: str | Path | None = None) -> None:
+    """Index a case-local auxiliary cache without changing the primary field metadata."""
+    path = Path(path)
+    if path.parent.parent.name != "auxiliary" or path.parents[3].name != "cases":
+        raise ValueError(f"Expected cases/<case>/auxiliary/<profile>/file: {path}")
+    case_dir = path.parents[2]
+    metadata_path = case_dir / "metadata.json"
+    metadata = json.loads(metadata_path.read_text()) if metadata_path.exists() else {
+        "schema": "field_case_v1", "dataset": "HighSpeedTrain", "case": case_dir.name,
+        "train_type": normalized_train_type(case_dir.name.split("_geo_", 1)[0]),
+        "geometry_id": parse_high_speed_geo_id(case_dir.name),
+        "cache_only": True,
+    }
+    record = {"file": str(path.relative_to(case_dir))}
+    if arrays is not None:
+        record["arrays"] = {
+            name: {"shape": list(np.shape(value)), "dtype": str(np.asarray(value).dtype)}
+            for name, value in arrays.items()
+        }
+    if shared_decoder is not None:
+        record["shared_decoder"] = str(Path(shared_decoder).relative_to(case_dir.parent.parent))
+    metadata.setdefault("auxiliary", {})[path.parent.name] = record
+    temporary = metadata_path.with_suffix(f".json.tmp.{os.getpid()}")
+    temporary.write_text(json.dumps(metadata, indent=2) + "\n")
+    temporary.replace(metadata_path)
 
 
 def cache_path(
@@ -101,7 +143,11 @@ def cache_path(
     case_name: str,
     cache_dtype: str = DEFAULT_CACHE_DTYPE,
 ) -> str:
-    return os.path.join(cache_dir(cache_root, train_type, kind, points, cache_dtype), f"{case_name}.npy")
+    root = Path(cache_root)
+    default_points = {"surface_random": DEFAULT_SURFACE_CACHE_POINTS, "volume_random": DEFAULT_VOLUME_CACHE_POINTS}
+    if default_points.get(kind) == int(points) and normalized_cache_dtype(cache_dtype) == "fp32":
+        return str(root / "cases" / case_name / ("surface.npy" if kind.startswith("surface") else "volume.npy"))
+    return os.path.join(cache_dir(cache_root, train_type, kind, points, cache_dtype, case_name), "data.npy")
 
 
 def identity_collate(batch):
@@ -125,11 +171,32 @@ def valid_npy_cache(path: str | Path, min_cols: int = 1, dtype: str | np.dtype |
 
 def atomic_save_npy(path: str | Path, arr: np.ndarray) -> None:
     path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = path.with_name(f"{path.name}.tmp.{os.getpid()}")
     try:
         with open(tmp_path, "wb") as f:
             np.save(f, arr)
         os.replace(tmp_path, path)
+        if path.name in {"surface.npy", "volume.npy"} and path.parent.parent.name == "cases":
+            from dataset.utils.load import parse_high_speed_case_cond, high_speed_free_stream
+            metadata_path = path.with_name("metadata.json")
+            metadata = json.loads(metadata_path.read_text()) if metadata_path.exists() else {}
+            case = path.parent.name
+            cond, _ = parse_high_speed_case_cond(case)
+            kind = path.stem
+            columns = HIGH_SPEED_SURFACE_CACHE_COLUMNS if kind == "surface" else HIGH_SPEED_VOLUME_CACHE_COLUMNS
+            metadata.update(schema="field_case_v1", dataset="HighSpeedTrain", case=case,
+                            train_type=normalized_train_type(case.split("_geo_", 1)[0]),
+                            geometry_id=parse_high_speed_geo_id(case), condition=cond.tolist(),
+                            free_stream=high_speed_free_stream(case).tolist())
+            metadata.pop("cache_only", None)
+            metadata[kind] = {"file": path.name, "shape": list(arr.shape), "dtype": str(arr.dtype),
+                              "columns": list(columns[:arr.shape[1]]), "pressure_kind": "kinematic_p"}
+            temporary = metadata_path.with_suffix(f".json.tmp.{os.getpid()}")
+            temporary.write_text(json.dumps(metadata, indent=2) + "\n")
+            temporary.replace(metadata_path)
+        elif path.parent.parent.name == "auxiliary":
+            register_auxiliary_cache(path, arrays={"data": arr})
     finally:
         if tmp_path.exists():
             tmp_path.unlink()
@@ -284,7 +351,7 @@ class HighSpeedTrainCacheBuilder(Dataset):
             raise ValueError("surface_distance_source must be 'surface_vtk' or 'surface_cache'.")
         self.root_dir = root_dir
         self.train_type = normalized_train_type(train_type)
-        self.cache_root = cache_root or os.path.join(root_dir, "cache")
+        self.cache_root = cache_root or HIGH_SPEED_TRAIN_CACHE_ROOT
         self.surface_cache_points = int(surface_cache_points)
         self.volume_cache_points = int(volume_cache_points)
         self.surface_sampling = surface_sampling

@@ -38,7 +38,8 @@ def sample_rows_np(arr: np.ndarray, num: int, rng: np.random.Generator) -> np.nd
 def rng_for_index(seed: int, idx: int, deterministic: bool) -> np.random.Generator:
     if deterministic:
         return np.random.default_rng(int(seed) + int(idx))
-    return np.random.default_rng()
+    # Draw from the worker RNG so checkpoint replay can reconstruct sampling.
+    return np.random.default_rng(int(np.random.randint(0, 2**32, dtype=np.uint32)))
 
 
 def grid_keys(grid: np.ndarray) -> np.ndarray:
