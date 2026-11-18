@@ -33,7 +33,7 @@ def make_experiment(dataset, model, size, surface=('p',), volume=(), dataset_opt
             distributed=dict(gpu_num=1,start_gpu=0,port=45325,backend='nccl')),
         train=dict(batch_size=1, workers=2, optimizer='AdamW', lr=1e-4, weight_decay=.05, total_steps=200000,
             warmup_iters=10000, final_lr_ratio=.01, clip_grad=1., log_interval=50, checkpoint_interval_steps=20000,
-            validation=dict(enabled=True,interval=20000,query_points=10000,batch_size=1,workers=2),
+            validation=dict(enabled=True,interval=None,query_points=10000,batch_size=1,workers=2),
             resume_checkpoint='',checkpoint='',ema={'enabled':True,'decay':.9999},auto_test=True),
         test=dict(batch_size=1,workers=2,query_chunk_size=10000,max_batches=0,checkpoint='',log_interval=20),
         visualization=dict(batch_size=1,workers=0,query_chunk_size=10000,max_points=20000,checkpoint='',output_dir=''))

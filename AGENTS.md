@@ -14,7 +14,7 @@
 - 模型规模由结构定义，在 model README 中登记。Transolver3 Medium=12层、Large=24层；DSAPT TinyG2222L2111 指 Tiny 主干、global/coarse 分支步幅2222与local/fine分支步幅2111，这些数字不是层数。结构细节及原名写入配置和迁移记录。
 - 主配置名必须为 `数据集_模型_规模_Surface预测量_Volume预测量.py`；无该域监督填 X。量采用 P、U、Normal、K、Omega、Nut、Distance 等已登记符号。名称不写 loss、优化器、GPU数、学习率、数据比例或跨类划分。
 - 结果目录为 `log/<主名>/<副名>/`。默认副名 `default`；变体按 `调整项_目标` 串联，如 `Loss_RelL2_GPU_3`。目录必须有 `config.py`（import主配置后显式覆盖）、简短 `README.md`（仅写改动）和 `train.log`。实际解析配置、来源哈希与原始机器指标可作为附加记录。训练日志采用 `[epoch][当前进度/总进度], lr: ..., time: ..., Loss: ..., surface_p: ...`，实际 global_step 同时记录在机器指标与 checkpoint；epoch或批次游标仅作诊断，不控制预算。
-- 新训练使用 `total_steps` 和按优化器更新计数的验证/保存间隔，默认200000步、每20000步验证。精确接续保持原预算、学习率位置、优化器、AMP scaler、EMA、各rank RNG与数据游标；仅有模型权重只能声明初始化，不能宣称精确接续。
+- 新训练使用 `total_steps` 和按优化器更新计数的验证/保存间隔，默认总长200000步；未特别指定时，验证间隔为 `max(10000, ceil(total_steps / 10))`（非整数向上取整）。例如200000步每20000步验证，50000步每10000步验证；显式指定的验证间隔优先。精确接续保持原预算、学习率位置、优化器、AMP scaler、EMA、各rank RNG与数据游标；仅有模型权重只能声明初始化，不能宣称精确接续。
 - 每次验证使用完整有效验证划分，不得限制32车、max_batches或静默跳过缺缓存样例。默认各受监督域单组10000随机query点，使用固定seed便于比较；在物理Cp空间、归一化前排除Cp < -10的点。整行排除使同点速度和其他监督量同步排除。其他物理量暂不设极值阈值。几何输入不依赖标签筛选；训练与测试不自动继承该验证阈值。
 - 最优checkpoint只能由验证集选择，默认逐样例相对L2均值、越小越好；记录指标空间、点集规则、有效样例数及步数。验证协议改变后重建best比较记录，历史32车成绩不可与新完整验证成绩混用。
 - checkpoint统一存 `~/zoujunhong/model/savemodel/field/<主名>/<副名>/`：`latest.pth` 为完整续训状态、`best.pth` 为验证最优；使用EMA时另存 `latest_ema.pth`、`best_ema.pth`。原子保存，保留独立可推理的完整参数与buffer。配置和改动说明同时备份。缺失的历史best/optimizer/RNG不得补造或把latest改名冒充best。

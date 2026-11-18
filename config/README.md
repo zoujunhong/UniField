@@ -32,7 +32,7 @@ for loss in CONFIG['task']['losses']:
 - `dataset/dataset_option/dataset_kwargs`：数据源及公共参数；`train/validation/test.dataset_kwargs` 为阶段覆盖。
 - `task.surface_input_list/surface_target_list/volume_target_list`：输入和监督量；`task.losses` 中设置 domain、field、pred_slice、weight、loss_type。
 - `runtime.distributed.gpu_num`：GPU数；`runtime.seed/amp/amp_dtype/compile`：运行设置。
-- `train.total_steps`：优化器更新预算；`train.validation.interval` 和 `checkpoint_interval_steps` 均以步计数。
+- `train.total_steps`：优化器更新预算；`train.validation.interval` 和 `checkpoint_interval_steps` 均以步计数。 `validation.interval` 缺省或为 `None` 时，在副配置覆盖总步数后按 `max(10000, ceil(total_steps / 10))` 计算；显式正整数优先。例如总长200000对应20000、50000对应10000。
 - `train.optimizer/lr/weight_decay/warmup_iters/final_lr_ratio`：优化配置；`train.ema={'enabled': True, 'decay': 0.9999}`。
 - `train.resume_checkpoint`：完整状态接续；`train.checkpoint`：权重初始化。二者不能混淆。
 - `train.auto_test`：正常完成后运行测试；`test.checkpoint` 可显式选择权重。

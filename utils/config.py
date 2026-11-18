@@ -290,7 +290,9 @@ def configure_training_run(config: dict[str, Any], *, for_training: bool = True)
         train.pop(obsolete, None)
     validation = train.setdefault('validation', {})
     validation.setdefault('enabled', True)
-    validation.setdefault('interval', 20000)
+    # Resolve after variant overrides, so changing the budget also updates the default.
+    if validation.get('interval') is None:
+        validation['interval'] = max(10000, (int(train['total_steps']) + 9) // 10)
     validation.setdefault('query_points', 10000)
     validation.setdefault('batch_size', 1)
     validation.setdefault('workers', 2)
